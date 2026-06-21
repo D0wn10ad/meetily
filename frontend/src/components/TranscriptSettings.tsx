@@ -10,7 +10,7 @@ import { ParakeetModelManager } from './ParakeetModelManager';
 
 
 export interface TranscriptModelProps {
-    provider: 'localWhisper' | 'parakeet' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+    provider: 'localWhisper' | 'parakeet' | 'funasr' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
     model: string;
     apiKey?: string | null;
 }
@@ -27,6 +27,14 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
     const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
+    const [funasrModels, setFunasrModels] = useState<Array<{ name: string, path: string, valid: boolean }>>([]);
+
+    // When provider === "funasr", fetch available models from disk
+    useEffect(() => {
+        if (uiProvider === 'funasr') {
+            invoke('api_scan_funasr_models').then(setFunasrModels).catch(console.error);
+        }
+    }, [uiProvider]);
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
@@ -34,7 +42,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     }, [transcriptModelConfig.provider]);
 
     useEffect(() => {
-        if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet') {
+        if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet' || transcriptModelConfig.provider === 'funasr') {
             setApiKey(null);
         }
     }, [transcriptModelConfig.provider]);
@@ -53,6 +61,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const modelOptions = {
         localWhisper: [], // Model selection handled by ModelManager component
         parakeet: [], // Model selection handled by ParakeetModelManager component
+        funasr: [], // Model handled by manual placement
         deepgram: ['nova-2-phonecall'],
         elevenLabs: ['eleven_multilingual_v2'],
         groq: ['llama-3.3-70b-versatile'],
@@ -112,8 +121,12 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 onValueChange={(value) => {
                                     const provider = value as TranscriptModelProps['provider'];
                                     setUiProvider(provider);
-                                    if (provider !== 'localWhisper' && provider !== 'parakeet') {
+                                    if (provider !== 'localWhisper' && provider !== 'parakeet' && provider !== 'funasr') {
                                         fetchApiKey(provider);
+                                    }
+                                    if (provider === 'funasr') {
+                                        setTranscriptModelConfig({ ...transcriptModelConfig, provider: 'funasr', model: '' });
+                                        invoke('api_save_transcript_config', { provider: 'funasr', model: '', apiKey: null as string | null });
                                     }
                                 }}
                             >
@@ -122,6 +135,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 </SelectTrigger>
                                 <SelectContent>
                                     <SelectItem value="parakeet">⚡ Parakeet (Recommended - Real-time / Accurate)</SelectItem>
+                                    <SelectItem value="funasr">🎯 FunASR (Paraformer - Chinese)</SelectItem>
                                     <SelectItem value="localWhisper">🏠 Local Whisper (High Accuracy)</SelectItem>
                                     {/* <SelectItem value="deepgram">☁️ Deepgram (Backup)</SelectItem>
                                     <SelectItem value="elevenLabs">☁️ ElevenLabs</SelectItem>
@@ -130,7 +144,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 </SelectContent>
                             </Select>
 
-                            {uiProvider !== 'localWhisper' && uiProvider !== 'parakeet' && (
+                            {uiProvider !== 'localWhisper' && uiProvider !== 'parakeet' && uiProvider !== 'funasr' && (
                                 <Select
                                     value={transcriptModelConfig.model}
                                     onValueChange={(value) => {
@@ -172,6 +186,30 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                         </div>
                     )}
 
+                    {uiProvider === 'funasr' && (
+                        <div className="mt-2">
+                            <Label>Model</Label>
+                            <Select
+                                value={transcriptModelConfig.model || funasrModels[0]?.name || ''}
+                                onValueChange={(v) => {
+                                    setTranscriptModelConfig({ ...transcriptModelConfig, provider: 'funasr', model: v });
+                                    invoke('api_save_transcript_config', { provider: 'funasr', model: v, apiKey: null as string | null });
+                                }}
+                            >
+                                <SelectTrigger className='focus:ring-1 focus:ring-blue-500 focus:border-blue-500'>
+                                    <SelectValue placeholder="Select model" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    {funasrModels.filter(m => m.valid).map(m => (
+                                        <SelectItem key={m.name} value={m.name}>{m.name}</SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                            <p className="text-xs text-muted-foreground mt-1">
+                                Place model.onnx, tokens.json, and am.mvn in your app data directory under models/funasr/{'{model_name}'}/
+                            </p>
+                        </div>
+                    )}
 
                     {requiresApiKey && (
                         <div>

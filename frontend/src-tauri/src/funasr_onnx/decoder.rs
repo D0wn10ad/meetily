@@ -48,7 +48,8 @@ pub fn decode(
 
     // 3. Filter special tokens
     let filtered: Vec<usize> = tokens
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|&id| id != BLANK_ID && id != SOS_ID && id != EOS_ID)
         .collect();
 
@@ -63,8 +64,9 @@ pub fn decode(
     for &token_id in selected {
         if token_id < token_list.len() {
             decoded.push_str(&token_list[token_id]);
+        } else {
+            log::warn!("FunASR decode: token {} out of range (vocab size {})", token_id, token_list.len());
         }
-        // If token_id >= token_list.len(), skip silently (warn but don't fail)
     }
 
     // 6. Post-processing: remove any remaining special token substrings
@@ -74,6 +76,8 @@ pub fn decode(
         .replace("<unk>", "")
         .replace("<blank>", "");
     let result = result.trim().to_string();
+
+    log::info!("FunASR decode: {} logit frames, {} raw tokens → {} filtered tokens → '{}'", num_frames, tokens.len(), filtered.len(), result);
 
     Ok(result)
 }

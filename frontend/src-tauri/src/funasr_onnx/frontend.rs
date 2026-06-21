@@ -316,6 +316,7 @@ impl FunasrFrontend {
     pub fn new(cmvn_path: &Path) -> Result<Self, FunasrError> {
         let bytes = std::fs::read(cmvn_path)?;
         let (cmvn_means, cmvn_inv_std) = parse_kaldi_cmvn(&bytes)?;
+        log::info!("FunASR CMVN loaded: {} means, {} inv_stds", cmvn_means.len(), cmvn_inv_std.len());
         Ok(Self {
             cmvn_means,
             cmvn_inv_std,
@@ -346,6 +347,7 @@ impl FunasrFrontend {
 
         // 3. Low Frame Rate stacking
         let lfr = apply_lfr(&fbank);
+        log::info!("FunASR frontend: {} samples → {} fbank frames → {} lfr frames", audio.len(), fbank.len(), lfr.len());
 
         // 4. CMVN normalisation
         let cmvn = apply_cmvn(&lfr, &self.cmvn_means, &self.cmvn_inv_std);

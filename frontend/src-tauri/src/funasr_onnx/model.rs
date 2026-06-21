@@ -34,12 +34,15 @@ impl FunasrModel {
             return Err(FunasrError::ModelNotFound(model_path.display().to_string()));
         }
 
+        log::info!("Loading FunASR Paraformer model from {}...", model_path.display());
         let providers = vec![CPUExecutionProvider::default().build()];
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_execution_providers(providers)?
             .with_parallel_execution(true)?
-            .commit_from_file(model_path)?;
+            .commit_from_file(&model_path)?;
+
+        log::info!("FunASR model loaded successfully from {}", model_path.display());
 
         // Log input/output shapes for debugging
         for input in &session.inputs {
@@ -65,6 +68,8 @@ impl FunasrModel {
         }
         let token_content = std::fs::read_to_string(&token_path)?;
         let token_list: Vec<String> = serde_json::from_str(&token_content)?;
+
+        log::info!("FunASR token list loaded: {} tokens", token_list.len());
 
         Ok(Self {
             session: Mutex::new(session),

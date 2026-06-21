@@ -81,6 +81,13 @@ struct TranscriptionStatus {
     last_activity_ms: u64,
 }
 
+#[derive(Debug, Serialize)]
+struct FunasrModelEntry {
+    name: String,
+    path: String,
+    valid: bool,
+}
+
 #[tauri::command]
 async fn start_recording<R: Runtime>(
     app: AppHandle<R>,
@@ -362,6 +369,38 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
             Err(e)
         }
     }
+}
+
+#[tauri::command]
+async fn api_scan_funasr_models<R: Runtime>(
+    _app: AppHandle<R>,
+    _state: tauri::State<'_, state::AppState>,
+) -> Result<Vec<FunasrModelEntry>, String> {
+    let app_data_dir = _app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let funasr_dir = app_data_dir.join("models").join("funasr");
+    if !funasr_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut models = Vec::new();
+    for entry in std::fs::read_dir(&funasr_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let valid = path.join("model.onnx").exists()
+                && path.join("tokens.json").exists()
+                && path.join("am.mvn").exists();
+            models.push(FunasrModelEntry {
+                name,
+                path: path.display().to_string(),
+                valid,
+            });
+        }
+    }
+    Ok(models)
 }
 
 #[tauri::command]
@@ -763,6 +802,8 @@ pub fn run() {
             audio::import::start_import_audio_command,
             audio::import::cancel_import_command,
             audio::import::is_import_in_progress_command,
+            // FunASR model scanning command
+            api_scan_funasr_models,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

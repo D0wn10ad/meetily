@@ -153,10 +153,11 @@ pub async fn validate_transcription_model_ready<R: Runtime>(
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+            let model_name = if config.model.is_empty() { "paraformer-large" } else { &config.model };
             let model_dir = app_data_dir
                 .join("models")
                 .join("funasr")
-                .join("paraformer-large");
+                .join(model_name);
             if !model_dir.join("model.onnx").exists() {
                 return Err(format!(
                     "FunASR model not found at {}. Please place model.onnx, tokens.json, and am.mvn in this directory.",
@@ -255,10 +256,11 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+            let model_name = if config.model.is_empty() { "paraformer-large" } else { &config.model };
             let model_dir = app_data_dir
                 .join("models")
                 .join("funasr")
-                .join("paraformer-large");
+                .join(model_name);
             let provider = crate::audio::transcription::FunasrProvider::new(&model_dir)
                 .map_err(|e| format!("Failed to initialize FunASR: {}", e))?;
             Ok(TranscriptionEngine::Provider(Arc::new(provider)))
