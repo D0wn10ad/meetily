@@ -390,8 +390,9 @@ async fn api_scan_funasr_models<R: Runtime>(
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
+            let has_token = path.join("tokens.json").exists() || path.join("token.json").exists();
             let valid = path.join("model.onnx").exists()
-                && path.join("tokens.json").exists()
+                && has_token
                 && path.join("am.mvn").exists();
             models.push(FunasrModelEntry {
                 name,
@@ -502,14 +503,7 @@ pub fn run() {
             parakeet_engine::commands::set_models_directory(&_app.handle());
 
             // Set up FunASR model directory (create if not exists)
-            let funasr_dir = _app
-                .handle()
-                .path()
-                .app_data_dir()
-                .map(|d| d.join("models").join("funasr").join("paraformer-large"))
-                .unwrap_or_default();
-            std::fs::create_dir_all(&funasr_dir).ok();
-            log::info!("📁 FunASR model directory: {}", funasr_dir.display());
+            crate::funasr_onnx::engine::initialize_models_directory(&_app.handle());
 
             // Initialize Parakeet engine on startup
             tauri::async_runtime::spawn(async {

@@ -8,10 +8,16 @@ export interface RawModelInfo {
 }
 
 export interface ModelOption {
-  provider: 'whisper' | 'parakeet';
+  provider: 'whisper' | 'parakeet' | 'funasr';
   name: string;
   displayName: string;
   size_mb: number;
+}
+
+interface FunasrModelEntry {
+  name: string;
+  path: string;
+  valid: boolean;
 }
 
 interface TranscriptModelConfig {
@@ -77,6 +83,22 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
       console.error('Failed to fetch Parakeet models:', err);
     }
 
+    // Fetch FunASR models
+    try {
+      const funasrModels = await invoke<FunasrModelEntry[]>('api_scan_funasr_models');
+      const availableFunasr = funasrModels
+        .filter((m) => m.valid)
+        .map((m) => ({
+          provider: 'funasr' as const,
+          name: m.name,
+          displayName: `🎯 FunASR (Paraformer): ${m.name}`,
+          size_mb: 0,
+        }));
+      allModels.push(...availableFunasr);
+    } catch (err) {
+      console.error('Failed to fetch FunASR models:', err);
+    }
+
     setAvailableModels(allModels);
 
     // Set default model based on user's saved configuration
@@ -88,7 +110,8 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     const configuredMatch = allModels.find(
       (m) =>
         (configuredProvider === 'localWhisper' && m.provider === 'whisper' && m.name === configuredModel) ||
-        (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel)
+        (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel) ||
+        (configuredProvider === 'funasr' && m.provider === 'funasr' && m.name === configuredModel)
     );
 
     // Only set default model if user hasn't manually selected one

@@ -7,6 +7,7 @@ import { Label } from './ui/label';
 import { Eye, EyeOff, Lock, Unlock } from 'lucide-react';
 import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
+import { FunasrModelManager } from './FunasrModelManager';
 
 
 export interface TranscriptModelProps {
@@ -27,14 +28,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
     const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
-    const [funasrModels, setFunasrModels] = useState<Array<{ name: string, path: string, valid: boolean }>>([]);
-
-    // When provider === "funasr", fetch available models from disk
-    useEffect(() => {
-        if (uiProvider === 'funasr') {
-            invoke('api_scan_funasr_models').then(setFunasrModels).catch(console.error);
-        }
-    }, [uiProvider]);
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
@@ -99,6 +92,18 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             model: modelName
         });
         // Close modal after selection
+        if (onModelSelect) {
+            onModelSelect();
+        }
+    };
+
+    const handleFunasrModelSelect = (modelName: string) => {
+        setTranscriptModelConfig({
+            ...transcriptModelConfig,
+            provider: 'funasr',
+            model: modelName
+        });
+        invoke('api_save_transcript_config', { provider: 'funasr', model: modelName, apiKey: null as string | null });
         if (onModelSelect) {
             onModelSelect();
         }
@@ -187,27 +192,12 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                     )}
 
                     {uiProvider === 'funasr' && (
-                        <div className="mt-2">
-                            <Label>Model</Label>
-                            <Select
-                                value={transcriptModelConfig.model || funasrModels[0]?.name || ''}
-                                onValueChange={(v) => {
-                                    setTranscriptModelConfig({ ...transcriptModelConfig, provider: 'funasr', model: v });
-                                    invoke('api_save_transcript_config', { provider: 'funasr', model: v, apiKey: null as string | null });
-                                }}
-                            >
-                                <SelectTrigger className='focus:ring-1 focus:ring-blue-500 focus:border-blue-500'>
-                                    <SelectValue placeholder="Select model" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    {funasrModels.filter(m => m.valid).map(m => (
-                                        <SelectItem key={m.name} value={m.name}>{m.name}</SelectItem>
-                                    ))}
-                                </SelectContent>
-                            </Select>
-                            <p className="text-xs text-muted-foreground mt-1">
-                                Place model.onnx, tokens.json, and am.mvn in your app data directory under models/funasr/{'{model_name}'}/
-                            </p>
+                        <div className="mt-6">
+                            <FunasrModelManager
+                                selectedModel={transcriptModelConfig.provider === 'funasr' ? transcriptModelConfig.model : undefined}
+                                onModelSelect={handleFunasrModelSelect}
+                                autoSave={true}
+                            />
                         </div>
                     )}
 
