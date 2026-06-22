@@ -1,0 +1,28 @@
+# Evidence: Task 1 - FunASR Wiring MVP
+
+## 1. pnpm lint output
+
+Command: pnpm run lint (frontend/)
+Result: Errors: 0 | Warnings: 0
+Note: Exit code 1 is a pre-existing tool quirk (same in main repo), not related to changes.
+
+## 2. cargo build -p meetily output
+
+Command: cargo build -p meetily (workspace root)
+Result: 0 errors, 25 warnings (all pre-existing - unused imports, dead code in audio pipeline, etc.)
+
+## Files Changed
+
+### frontend/src/components/TranscriptSettings.tsx
+- Added 'funasr' to provider union type (line 13)
+- Added funasr: [] to modelOptions (line 56)
+- Added funasr exclusion to API key clearing useEffect (line 37)
+- Added funasr exclusion to fetchApiKey condition in onValueChange (line 116)
+- Added FunASR SelectItem to dropdown (line 126)
+- Added funasr exclusion to model selector dropdown condition (line 135)
+
+### .omo/design/funasr-autodownload-next.md
+- Created design document for next implementation batch
+
+## Verification Date
+Sun Jun 21 2026
