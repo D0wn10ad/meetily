@@ -1,9 +1,6 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use ort::execution_providers::CPUExecutionProvider;
-#[cfg(feature = "ort-dml")]
-use ort::execution_providers::DirectMLExecutionProvider;
 use ort::inputs;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
@@ -38,17 +35,11 @@ impl FunasrModel {
 
         log::info!("Loading FunASR Paraformer model from {}...", model_path.display());
 
-        #[cfg(feature = "ort-dml")]
-        let providers = vec![
-            DirectMLExecutionProvider::default().build(),
-            CPUExecutionProvider::default().build(),
-        ];
-
-        #[cfg(not(feature = "ort-dml"))]
-        let providers = vec![CPUExecutionProvider::default().build()];
-
-        #[cfg(feature = "ort-dml")]
-        log::info!("FunASR model using DirectML GPU acceleration");
+        let gpu_type = crate::audio::hardware_detector::HardwareProfile::detect().gpu_type;
+        let providers = crate::audio::onnx_provider::get_onnx_providers(gpu_type);
+        for p in &providers {
+            log::info!("  └─ EP: {:?}", p);
+        }
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_execution_providers(providers)?
