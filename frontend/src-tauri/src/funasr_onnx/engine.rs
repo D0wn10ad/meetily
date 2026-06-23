@@ -1,6 +1,35 @@
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use tauri::{Manager, Runtime};
 use std::path::Path;
 
 use crate::funasr_onnx::{FunasrError, FunasrFrontend, FunasrModel};
+
+/// Global FunASR models directory, set once during app setup.
+static MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Initialize the FunASR models directory using the app data dir.
+/// This should be called during app setup before any FunASR operations.
+pub fn initialize_models_directory<R: Runtime>(app: &tauri::AppHandle<R>) {
+    let models_dir = app
+        .path()
+        .app_data_dir()
+        .expect("Failed to get app data dir")
+        .join("models");
+
+    if !models_dir.exists() {
+        if let Err(e) = std::fs::create_dir_all(&models_dir) {
+            log::error!("Failed to create FunASR models directory: {}", e);
+            return;
+        }
+    }
+
+    log::info!("FunASR models directory set to: {}", models_dir.display());
+
+    let mut guard = MODELS_DIR.lock().unwrap();
+    *guard = Some(models_dir);
+}
 
 pub struct FunasrEngine {
     model: FunasrModel,
