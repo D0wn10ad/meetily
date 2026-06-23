@@ -798,6 +798,9 @@ pub fn run() {
             audio::import::is_import_in_progress_command,
             // FunASR model scanning command
             api_scan_funasr_models,
+            // FunASR download commands
+            funasr_onnx::commands::funasr_download_model,
+            funasr_onnx::commands::funasr_cancel_download,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
