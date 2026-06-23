@@ -36,7 +36,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 #   .\build-gpu.ps1 (Windows PowerShell)
 #
 [features]
-default = ["platform-default"]  # Automatically enables best backend per platform
+default = ["platform-default", "ort-cpu"]  # Automatically enables best backend per platform
 
 # Platform-appropriate defaults - see target-specific dependencies below
 platform-default = []
@@ -51,7 +51,13 @@ hipblas = ["whisper-rs/hipblas"]   # Linux: AMD ROCm HIP
 # CPU optimizations (fallback for systems without GPU)
 openblas = ["whisper-rs/openblas"] # Optimized BLAS (Auto-enabled on Windows/Linux)
 openmp = ["whisper-rs/openmp"]     # OpenMP parallel processing
-ort-dml = []  # DirectML GPU acceleration for ONNX Runtime on Windows
+ort-dml = ["ort/directml"]  # DirectML GPU acceleration for ONNX Runtime on Windows (deprecated, use ort-directml)
+# ONNX Runtime execution providers (gated at compile time by build-gpu.sh)
+ort-cpu = []                                    # CPU fallback (always available)
+ort-cuda = ["ort/cuda"]                         # NVIDIA GPU
+ort-directml = ["ort/directml"]                 # Windows DirectML
+ort-coreml = ["ort/coreml"]                     # Apple CoreML (macOS)
+ort-openvino = ["ort/openvino"]                 # Intel OpenVINO (Linux)
 
 [build-dependencies]
 tauri-build = { version = "2.3.0", features = [] }
@@ -104,7 +110,10 @@ futures-util = "0.3"
 silero_rs = { git = "https://github.com/emotechlab/silero-rs", rev = "26a6460", package = "silero" }
 
 # Parakeet (ONNX-based fast transcription) dependencies
-ort = { version = "2.0.0-rc.10", features = ["dml"] }  # ONNX Runtime for Parakeet models
+ort = { version = "2.0.0-rc.10", default-features = false, features = [
+    "ndarray",
+    "download-binaries",
+] }  # ONNX Runtime for Parakeet & FunASR models
 thiserror = "2.0.16"                # Error handling for Parakeet
 
 # Async
