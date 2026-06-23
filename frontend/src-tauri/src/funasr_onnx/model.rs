@@ -167,4 +167,18 @@ mod tests {
         assert!(result.is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn test_session_creation_with_dynamic_providers() {
+        for gpu in [
+            crate::audio::hardware_detector::GpuType::None,
+            crate::audio::hardware_detector::GpuType::Metal,
+            crate::audio::hardware_detector::GpuType::Cuda,
+            crate::audio::hardware_detector::GpuType::Vulkan,
+            crate::audio::hardware_detector::GpuType::OpenCL,
+        ] {
+            let providers = crate::audio::onnx_provider::get_onnx_providers(gpu);
+            assert!(!providers.is_empty(), "Must always have at least CPU fallback for {:?}", gpu);
+        }
+    }
 }
