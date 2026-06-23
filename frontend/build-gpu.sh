@@ -88,6 +88,42 @@ else
     echo -e "${YELLOW}⚠️ No specific GPU feature detected or forced${NC}"
 fi
 
+# ============================================================
+# ONNX Runtime execution provider selection
+# ============================================================
+# Maps detected GPU type to ort Cargo features for FunASR / Parakeet.
+# CPU is always the fallback — ORT silently skips unavailable providers.
+ORT_FEATURES=""
+
+if [ -n "$TAURI_GPU_FEATURE" ]; then
+    case "$TAURI_GPU_FEATURE" in
+        coreml|metal)
+            ORT_FEATURES="--features ort-coreml"
+            echo -e "${GREEN}🔧 ONNX: Using CoreML (Apple GPU + ANE NPU)${NC}"
+            ;;
+        cuda)
+            ORT_FEATURES="--features ort-cuda,ort-directml"
+            echo -e "${GREEN}🔧 ONNX: Using CUDA + DirectML (NVIDIA GPU)${NC}"
+            ;;
+        vulkan|hipblas)
+            if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
+                ORT_FEATURES="--features ort-directml"
+                echo -e "${GREEN}🔧 ONNX: Using DirectML (Windows GPU)${NC}"
+            else
+                ORT_FEATURES="--features ort-openvino"
+                echo -e "${GREEN}🔧 ONNX: Using OpenVINO (Intel GPU + NPU)${NC}"
+            fi
+            ;;
+        openblas|*)
+            ORT_FEATURES="--features ort-cpu"
+            echo -e "${GREEN}🔧 ONNX: Using CPU fallback${NC}"
+            ;;
+    esac
+else
+    ORT_FEATURES="--features ort-cpu"
+    echo -e "${GREEN}🔧 ONNX: No GPU detected, using CPU fallback${NC}"
+fi
+
 # Build llama-helper
 echo ""
 echo -e "${BLUE}🦙 Building llama-helper sidecar (release)...${NC}"
@@ -175,6 +211,19 @@ echo -e "${BLUE}Building complete Tauri application...${NC}"
 echo ""
 
 # NO_STRIP true due to issues with bundling appImage
+
+# Append ONNX Runtime features to TAURI_GPU_FEATURE for tauri build
+# This combines whisper features (e.g., "coreml") with ort features (e.g., "ort-coreml")
+# into a single comma-separated string passed to `--features` by tauri-auto.js
+if [ -n "$ORT_FEATURES" ]; then
+    ORT_FLAG="${ORT_FEATURES#--features }"
+    if [ -n "$TAURI_GPU_FEATURE" ]; then
+        export TAURI_GPU_FEATURE="${TAURI_GPU_FEATURE},${ORT_FLAG}"
+    else
+        export TAURI_GPU_FEATURE="${ORT_FLAG}"
+    fi
+fi
+
 NO_STRIP=true $PKG_MGR run tauri:build
 
 if [ $? -eq 0 ]; then
