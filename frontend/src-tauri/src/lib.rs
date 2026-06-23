@@ -44,6 +44,7 @@ pub mod console_utils;
 pub mod database;
 pub mod funasr_onnx;
 pub mod groq;
+pub mod sherpa_onnx;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
