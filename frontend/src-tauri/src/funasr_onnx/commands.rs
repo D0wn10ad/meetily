@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use tauri::{AppHandle, Emitter, Manager};
 use serde::Serialize;
+use serde_yaml::Value;
 use tokio::io::AsyncWriteExt;
 
 static CANCEL_DOWNLOAD: AtomicBool = AtomicBool::new(false);
@@ -165,7 +166,7 @@ pub async fn funasr_download_model(app: AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    let base_url = "https://huggingface.co/modelscope/FunASR-Paraformer-Large/resolve/main";
+    let base_url = "https://huggingface.co/funasr/Paraformer-large/resolve/main";
     let ms_base_url = "https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/resolve/master";
 
     // 1) ONNX model file (95% of total weight)
@@ -196,19 +197,40 @@ pub async fn funasr_download_model(app: AppHandle) -> Result<(), String> {
     )
     .await?;
 
-    // 3) tokens.json (2.5%)
-    log::info!("Downloading tokens.json...");
+    // 3) config.yaml (2%) → extract tokens.json from it
+    log::info!("Downloading config.yaml for token extraction...");
+    let cfg_path = dir.join("config.yaml");
     download_with_fallback(
-        &format!("{}/tokens.json", base_url),
-        &format!("{}/tokens.json", ms_base_url),
-        &tokens_path,
+        &format!("{}/config.yaml", base_url),
+        &format!("{}/config.yaml", ms_base_url),
+        &cfg_path,
         &app,
         0.975,
-        0.025,
-        10_000,
-        "downloading_tokens",
+        0.02,
+        60_000,
+        "downloading_config",
     )
     .await?;
+
+    // Extract token_list from config.yaml and write tokens.json (0.5%)
+    log::info!("Extracting token_list from config.yaml...");
+    let content = std::fs::read_to_string(&cfg_path)
+        .map_err(|e| format!("Failed to read config.yaml: {}", e))?;
+    let yaml: Value = serde_yaml::from_str(&content)
+        .map_err(|e| format!("Failed to parse config.yaml: {}", e))?;
+    let token_list = yaml["token_list"]
+        .as_sequence()
+        .ok_or_else(|| "Missing token_list in config.yaml".to_string())?
+        .iter()
+        .map(|v| v.as_str().unwrap_or("").to_string())
+        .collect::<Vec<String>>();
+    let tokens_json = serde_json::to_string(&token_list)
+        .map_err(|e| format!("Failed to serialize tokens: {}", e))?;
+    std::fs::write(&tokens_path, &tokens_json)
+        .map_err(|e| format!("Failed to write tokens.json: {}", e))?;
+    // Clean up config.yaml (not needed at runtime)
+    std::fs::remove_file(&cfg_path)
+        .map_err(|e| format!("Failed to remove config.yaml: {}", e))?;
 
     // Emit completion
     let _ = app.emit(
