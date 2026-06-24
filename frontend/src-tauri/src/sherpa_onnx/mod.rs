@@ -40,8 +40,8 @@ impl From<std::io::Error> for SherpaOnnxError {
     }
 }
 
-/// Re-exports for submodules (will be uncommented as modules are created)
-// pub mod model;
+/// Submodules
+pub mod model;
 // pub mod engine;
 // pub mod commands;
 
