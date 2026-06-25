@@ -94,12 +94,13 @@ export function RetranscribeDialog({
   }, [selectedModelKey, availableModels]);
   const isParakeetModel = selectedModelDetails?.provider === 'parakeet';
   const isFunasrModel = selectedModelDetails?.provider === 'funasr';
+  const isSherpaOnnxModel = selectedModelDetails?.provider === 'sherpa-onnx';
 
   useEffect(() => {
-    if ((isParakeetModel || isFunasrModel) && selectedLang !== 'auto') {
+    if ((isParakeetModel || isFunasrModel || isSherpaOnnxModel) && selectedLang !== 'auto') {
       setSelectedLang('auto');
     }
-  }, [isParakeetModel, isFunasrModel, selectedLang]);
+  }, [isParakeetModel, isFunasrModel, isSherpaOnnxModel, selectedLang]);
 
   // Reset state only when dialog transitions from closed to open
   // This prevents re-initialization when config changes while dialog is already open
@@ -208,9 +209,9 @@ export function RetranscribeDialog({
     setProgress(null);
 
     try {
-      const languageToSend = (isParakeetModel || isFunasrModel) ? null : selectedLang === 'auto' ? null : selectedLang;
+      const languageToSend = (isParakeetModel || isFunasrModel || isSherpaOnnxModel) ? null : selectedLang === 'auto' ? null : selectedLang;
       await Analytics.track('enhance_transcript_started', {
-        language: (isParakeetModel || isFunasrModel) ? 'auto' : (selectedLang === 'auto' ? 'auto' : selectedLang),
+        language: (isParakeetModel || isFunasrModel || isSherpaOnnxModel) ? 'auto' : (selectedLang === 'auto' ? 'auto' : selectedLang),
         model_provider: selectedModelDetails?.provider || '',
         model_name: selectedModelDetails?.name || ''
       });
@@ -302,7 +303,7 @@ export function RetranscribeDialog({
 
         <div className="space-y-4 py-4">
           {!isProcessing && !error && (
-            !isParakeetModel && !isFunasrModel ? (
+            !isParakeetModel && !isFunasrModel && !isSherpaOnnxModel ? (
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <Globe className="h-4 w-4 text-muted-foreground" />

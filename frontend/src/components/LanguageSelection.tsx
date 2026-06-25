@@ -118,7 +118,7 @@ interface LanguageSelectionProps {
   selectedLanguage: string;
   onLanguageChange: (language: string) => void;
   disabled?: boolean;
-  provider?: 'localWhisper' | 'parakeet' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+  provider?: 'localWhisper' | 'parakeet' | 'sherpa-onnx' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
 }
 
 export function LanguageSelection({
@@ -130,9 +130,11 @@ export function LanguageSelection({
   const [saving, setSaving] = useState(false);
   const { setSelectedLanguage } = useConfig();
 
-  // Parakeet only supports auto-detection (doesn't support manual language selection)
+  // Parakeet and Sherpa-ONNX only support auto-detection (doesn't support manual language selection)
   const isParakeet = provider === 'parakeet';
-  const availableLanguages = isParakeet
+  const isSherpaOnnx = provider === 'sherpa-onnx';
+  const isAutoDetectOnly = isParakeet || isSherpaOnnx;
+  const availableLanguages = isAutoDetectOnly
     ? LANGUAGES.filter(lang => lang.code === 'auto' || lang.code === 'auto-translate')
     : LANGUAGES;
 
@@ -202,6 +204,14 @@ export function LanguageSelection({
           <div className="p-2 bg-amber-50 border border-amber-200 rounded text-amber-800">
             <p className="font-medium">ℹ️ Parakeet Language Support</p>
             <p className="mt-1 text-xs">Parakeet currently only supports automatic language detection. Manual language selection is not available. Use Whisper if you need to specify a particular language.</p>
+          </div>
+        )}
+
+        {/* Sherpa-ONNX language limitation warning */}
+        {isSherpaOnnx && (
+          <div className="p-2 bg-amber-50 border border-amber-200 rounded text-amber-800">
+            <p className="font-medium">ℹ️ Sherpa-ONNX Language Support</p>
+            <p className="mt-1 text-xs">Sherpa-ONNX (SenseVoice) currently only supports automatic language detection. Manual language selection is not available. Use Whisper if you need to specify a particular language.</p>
           </div>
         )}
 

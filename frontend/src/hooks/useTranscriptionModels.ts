@@ -8,13 +8,19 @@ export interface RawModelInfo {
 }
 
 export interface ModelOption {
-  provider: 'whisper' | 'parakeet' | 'funasr';
+  provider: 'whisper' | 'parakeet' | 'funasr' | 'sherpa-onnx';
   name: string;
   displayName: string;
   size_mb: number;
 }
 
 interface FunasrModelEntry {
+  name: string;
+  path: string;
+  valid: boolean;
+}
+
+interface SherpaOnnxModelEntry {
   name: string;
   path: string;
   valid: boolean;
@@ -99,6 +105,22 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
       console.error('Failed to fetch FunASR models:', err);
     }
 
+    // Fetch Sherpa-ONNX models
+    try {
+      const sherpaOnnxModels = await invoke<SherpaOnnxModelEntry[]>('sherpa_onnx_scan_models');
+      const availableSherpaOnnx = sherpaOnnxModels
+        .filter((m) => m.valid)
+        .map((m) => ({
+          provider: 'sherpa-onnx' as const,
+          name: m.name,
+          displayName: `🏷️ Sherpa-ONNX: ${m.name}`,
+          size_mb: 0,
+        }));
+      allModels.push(...availableSherpaOnnx);
+    } catch (err) {
+      console.error('Failed to fetch Sherpa-ONNX models:', err);
+    }
+
     setAvailableModels(allModels);
 
     // Set default model based on user's saved configuration
@@ -111,7 +133,8 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
       (m) =>
         (configuredProvider === 'localWhisper' && m.provider === 'whisper' && m.name === configuredModel) ||
         (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel) ||
-        (configuredProvider === 'funasr' && m.provider === 'funasr' && m.name === configuredModel)
+        (configuredProvider === 'funasr' && m.provider === 'funasr' && m.name === configuredModel) ||
+        (configuredProvider === 'sherpa-onnx' && m.provider === 'sherpa-onnx' && m.name === configuredModel)
     );
 
     // Only set default model if user hasn't manually selected one
