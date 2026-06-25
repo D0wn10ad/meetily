@@ -6,6 +6,7 @@ pub mod engine;
 pub mod funasr_provider;
 pub mod parakeet_provider;
 pub mod provider;
+pub mod sherpa_onnx_provider;
 pub mod whisper_provider;
 pub mod worker;
 
@@ -17,5 +18,6 @@ pub use engine::{
 pub use funasr_provider::FunasrProvider;
 pub use parakeet_provider::ParakeetProvider;
 pub use provider::{TranscriptResult, TranscriptionError, TranscriptionProvider};
+pub use sherpa_onnx_provider::SherpaOnnxProvider;
 pub use whisper_provider::WhisperProvider;
 pub use worker::{reset_speech_detected_flag, start_transcription_task, TranscriptUpdate};

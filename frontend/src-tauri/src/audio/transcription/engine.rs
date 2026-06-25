@@ -167,13 +167,42 @@ pub async fn validate_transcription_model_ready<R: Runtime>(
             info!("✅ FunASR model directory found at {}", model_dir.display());
             Ok(())
         }
+        "sherpa-onnx" => {
+            info!("🔍 Validating Sherpa-ONNX model...");
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+            let model_name = if config.model.is_empty() {
+                "sensevoice"
+            } else {
+                &config.model
+            };
+            let model_dir = app_data_dir
+                .join("models")
+                .join("sherpa-onnx")
+                .join(model_name);
+            if !model_dir.exists() {
+                return Err(format!(
+                    "Sherpa-ONNX model not found at {}. Please place model.onnx and tokens.txt in this directory.",
+                    model_dir.display()
+                ));
+            }
+            crate::sherpa_onnx::model::validate_model_dir(&model_dir)
+                .map_err(|e| format!("Sherpa-ONNX model validation failed: {}", e))?;
+            info!(
+                "✅ Sherpa-ONNX model directory found at {}",
+                model_dir.display()
+            );
+            Ok(())
+        }
         other => {
             warn!(
                 "❌ Unsupported transcription provider for local recording: {}",
                 other
             );
             Err(format!(
-                "Provider '{}' is not supported for local transcription. Please select 'localWhisper', 'parakeet', or 'funasr'.",
+                "Provider '{}' is not supported for local transcription. Please select 'localWhisper', 'parakeet', 'funasr', or 'sherpa-onnx'.",
                 other
             ))
         }
@@ -263,6 +292,25 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                 .join(model_name);
             let provider = crate::audio::transcription::FunasrProvider::new(&model_dir)
                 .map_err(|e| format!("Failed to initialize FunASR: {}", e))?;
+            Ok(TranscriptionEngine::Provider(Arc::new(provider)))
+        }
+        "sherpa-onnx" => {
+            info!("🎯 Initializing Sherpa-ONNX transcription engine");
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+            let model_name = if config.model.is_empty() {
+                "sensevoice"
+            } else {
+                &config.model
+            };
+            let model_dir = app_data_dir
+                .join("models")
+                .join("sherpa-onnx")
+                .join(model_name);
+            let provider = crate::audio::transcription::SherpaOnnxProvider::new(&model_dir)
+                .map_err(|e| format!("Failed to initialize Sherpa-ONNX: {}", e))?;
             Ok(TranscriptionEngine::Provider(Arc::new(provider)))
         }
         "localWhisper" | _ => {
