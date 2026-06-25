@@ -8,10 +8,11 @@ import { Eye, EyeOff, Lock, Unlock } from 'lucide-react';
 import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
 import { FunasrModelManager } from './FunasrModelManager';
+import { SherpaOnnxModelManager } from './SherpaOnnxModelManager';
 
 
 export interface TranscriptModelProps {
-    provider: 'localWhisper' | 'parakeet' | 'funasr' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+    provider: 'localWhisper' | 'parakeet' | 'funasr' | 'sherpa-onnx' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
     model: string;
     apiKey?: string | null;
 }
@@ -35,7 +36,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     }, [transcriptModelConfig.provider]);
 
     useEffect(() => {
-        if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet' || transcriptModelConfig.provider === 'funasr') {
+        if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet' || transcriptModelConfig.provider === 'funasr' || transcriptModelConfig.provider === 'sherpa-onnx') {
             setApiKey(null);
         }
     }, [transcriptModelConfig.provider]);
@@ -55,6 +56,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         localWhisper: [], // Model selection handled by ModelManager component
         parakeet: [], // Model selection handled by ParakeetModelManager component
         funasr: [], // Model handled by manual placement
+        'sherpa-onnx': [], // Model selection handled by SherpaOnnxModelManager
         deepgram: ['nova-2-phonecall'],
         elevenLabs: ['eleven_multilingual_v2'],
         groq: ['llama-3.3-70b-versatile'],
@@ -109,6 +111,18 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         }
     };
 
+    const handleSherpaOnnxModelSelect = (modelName: string) => {
+        setTranscriptModelConfig({
+            ...transcriptModelConfig,
+            provider: 'sherpa-onnx',
+            model: modelName
+        });
+        invoke('api_save_transcript_config', { provider: 'sherpa-onnx', model: modelName, apiKey: null as string | null });
+        if (onModelSelect) {
+            onModelSelect();
+        }
+    };
+
     return (
         <div>
             <div>
@@ -126,12 +140,16 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 onValueChange={(value) => {
                                     const provider = value as TranscriptModelProps['provider'];
                                     setUiProvider(provider);
-                                    if (provider !== 'localWhisper' && provider !== 'parakeet' && provider !== 'funasr') {
+                                    if (provider !== 'localWhisper' && provider !== 'parakeet' && provider !== 'funasr' && provider !== 'sherpa-onnx') {
                                         fetchApiKey(provider);
                                     }
                                     if (provider === 'funasr') {
                                         setTranscriptModelConfig({ ...transcriptModelConfig, provider: 'funasr', model: '' });
                                         invoke('api_save_transcript_config', { provider: 'funasr', model: '', apiKey: null as string | null });
+                                    }
+                                    if (provider === 'sherpa-onnx') {
+                                        setTranscriptModelConfig({ ...transcriptModelConfig, provider: 'sherpa-onnx', model: '' });
+                                        invoke('api_save_transcript_config', { provider: 'sherpa-onnx', model: '', apiKey: null as string | null });
                                     }
                                 }}
                             >
@@ -141,6 +159,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 <SelectContent>
                                     <SelectItem value="parakeet">⚡ Parakeet (Recommended - Real-time / Accurate)</SelectItem>
                                     <SelectItem value="funasr">🎯 FunASR (Paraformer - Chinese)</SelectItem>
+                                    <SelectItem value="sherpa-onnx">🧠 Sherpa-ONNX (SenseVoice - Multi-language)</SelectItem>
                                     <SelectItem value="localWhisper">🏠 Local Whisper (High Accuracy)</SelectItem>
                                     {/* <SelectItem value="deepgram">☁️ Deepgram (Backup)</SelectItem>
                                     <SelectItem value="elevenLabs">☁️ ElevenLabs</SelectItem>
@@ -149,7 +168,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 </SelectContent>
                             </Select>
 
-                            {uiProvider !== 'localWhisper' && uiProvider !== 'parakeet' && uiProvider !== 'funasr' && (
+                            {uiProvider !== 'localWhisper' && uiProvider !== 'parakeet' && uiProvider !== 'funasr' && uiProvider !== 'sherpa-onnx' && (
                                 <Select
                                     value={transcriptModelConfig.model}
                                     onValueChange={(value) => {
@@ -196,6 +215,16 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                             <FunasrModelManager
                                 selectedModel={transcriptModelConfig.provider === 'funasr' ? transcriptModelConfig.model : undefined}
                                 onModelSelect={handleFunasrModelSelect}
+                                autoSave={true}
+                            />
+                        </div>
+                    )}
+
+                    {uiProvider === 'sherpa-onnx' && (
+                        <div className="mt-6">
+                            <SherpaOnnxModelManager
+                                selectedModel={transcriptModelConfig.provider === 'sherpa-onnx' ? transcriptModelConfig.model : undefined}
+                                onModelSelect={handleSherpaOnnxModelSelect}
                                 autoSave={true}
                             />
                         </div>

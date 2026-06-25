@@ -631,7 +631,7 @@ Todos 1-5 are independent (Wave 1). Todo 6 depends on 4. Todos 7-11 depend on 6.
 
 ## Final verification wave
 
-- [ ] F1. Plan compliance audit
+- [x] F1. Plan compliance audit
   - Verify: All 11 todos completed, exactly the scoped deliverables exist
   - Verify: No scope creep — no auto-download, no diarization, no Paraformer, no new Tauri events
   - Verify: No `TranscriptionEngine::SherpaOnnx` variant added (must use `Provider(Arc<...>)`)
@@ -639,7 +639,7 @@ Todos 1-5 are independent (Wave 1). Todo 6 depends on 4. Todos 7-11 depend on 6.
   - Verify: No changes to `TranscriptionProvider` trait or `TranscriptResult`
   - Evidence: `.omo/evidence/f1-plan-compliance.md`
 
-- [ ] F2. Code quality review
+- [x] F2. Code quality review
   - Verify: `cargo clippy -p meetily` clean (no warnings introduced)
   - Verify: No `unsafe` blocks in `sherpa_onnx/` module
   - Verify: All public items documented with doc comments
@@ -648,7 +648,7 @@ Todos 1-5 are independent (Wave 1). Todo 6 depends on 4. Todos 7-11 depend on 6.
   - Verify: No `unwrap()` or `expect()` in production paths (tests may use them)
   - Evidence: `.omo/evidence/f2-code-quality.md`
 
-- [ ] F3. Real manual QA
+- [x] F3. Real manual QA
   - Verify: `cargo test -p meetily` all tests pass
   - Verify: Building with `cargo build -p meetily` completes without errors
   - Verify: Integration test with real SenseVoice model + real audio → meaningful text output
@@ -656,7 +656,7 @@ Todos 1-5 are independent (Wave 1). Todo 6 depends on 4. Todos 7-11 depend on 6.
   - Verify: Retranscription with Sherpa-ONNX works (via `get_or_init_transcription_engine()`)
   - Evidence: `.omo/evidence/f3-manual-qa.md`
 
-- [ ] F4. Scope fidelity
+- [x] F4. Scope fidelity
   - Verify: `git diff --stat` shows only expected files changed
   - Verify: No changes to `parakeet_engine/`, `whisper_engine/`, or `funasr_onnx/` directories
   - Verify: No changes to `TranscriptionProvider` trait or `TranscriptResult`
