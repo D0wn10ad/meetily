@@ -506,6 +506,9 @@ pub fn run() {
             // Set up FunASR model directory (create if not exists)
             crate::funasr_onnx::engine::initialize_models_directory(&_app.handle());
 
+            // Set up sherpa-onnx model directory (create if not exists)
+            crate::sherpa_onnx::commands::initialize_models_directory(&_app.handle());
+
             // Initialize Parakeet engine on startup
             tauri::async_runtime::spawn(async {
                 if let Err(e) = parakeet_engine::commands::parakeet_init().await {
@@ -799,6 +802,9 @@ pub fn run() {
             audio::import::is_import_in_progress_command,
             // FunASR model scanning command
             api_scan_funasr_models,
+            // Sherpa-ONNX model management commands
+            sherpa_onnx::commands::sherpa_onnx_scan_models,
+            sherpa_onnx::commands::sherpa_onnx_validate_model,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

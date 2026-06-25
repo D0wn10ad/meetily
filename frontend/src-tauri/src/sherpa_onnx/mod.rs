@@ -43,7 +43,7 @@ impl From<std::io::Error> for SherpaOnnxError {
 /// Submodules
 pub mod engine;
 pub mod model;
-// pub mod commands;
+pub mod commands;
 
 #[cfg(test)]
 mod tests {
