@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use crate::audio::transcription::provider::TranscriptionProvider;
+use crate::audio::transcription::SherpaOnnxProvider;
 use crate::funasr_onnx::FunasrEngine;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_dialog::DialogExt;
@@ -31,6 +33,9 @@ static IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 /// Global FunASR engine instance (initialized once, reused across import jobs)
 static IMPORT_FUNASR_ENGINE: OnceLock<Arc<FunasrEngine>> = OnceLock::new();
+
+/// Global Sherpa-ONNX engine instance (initialized once, reused across import jobs)
+static SHERPA_ONNX_ENGINE: OnceLock<Arc<SherpaOnnxProvider>> = OnceLock::new();
 
 /// RAII guard for IMPORT_IN_PROGRESS flag
 /// Ensures flag is cleared even if import panics or returns early
@@ -267,11 +272,12 @@ pub async fn start_import<R: Runtime>(
 
     let use_parakeet = provider.as_deref() == Some("parakeet");
     let use_funasr = provider.as_deref() == Some("funasr");
+    let use_sherpa_onnx = provider.as_deref() == Some("sherpa-onnx");
     let result = run_import(app.clone(), source_path, title, language, model, provider).await;
 
     // Unload the engine after the batch job (success, failure, or cancellation)
-    // FunASR uses OnceLock (persistent), no unload needed
-    if !use_funasr {
+    // FunASR/Sherpa-ONNX uses OnceLock (persistent), no unload needed
+    if !use_funasr && !use_sherpa_onnx {
         super::common::unload_engine_after_batch(use_parakeet).await;
     }
 
@@ -327,6 +333,7 @@ async fn run_import<R: Runtime>(
     // Determine which provider to use (default to whisper)
     let use_parakeet = provider.as_deref() == Some("parakeet");
     let use_funasr = provider.as_deref() == Some("funasr");
+    let use_sherpa_onnx = provider.as_deref() == Some("sherpa-onnx");
 
     emit_progress(&app, "copying", 5, "Creating meeting folder...");
 
@@ -516,7 +523,7 @@ async fn run_import<R: Runtime>(
     emit_progress(&app, "transcribing", 30, "Loading transcription engine...");
 
     // Initialize the appropriate engine
-    let whisper_engine = if !use_parakeet && !use_funasr && total_segments > 0 {
+    let whisper_engine = if !use_parakeet && !use_funasr && !use_sherpa_onnx && total_segments > 0 {
         Some(get_or_init_whisper(&app, model.as_deref()).await?)
     } else {
         None
@@ -528,6 +535,12 @@ async fn run_import<R: Runtime>(
     };
     let funasr_engine = if use_funasr && total_segments > 0 {
         Some(get_or_init_funasr(&app).await?)
+    } else {
+        None
+    };
+    let sherpa_onnx_engine = if use_sherpa_onnx && total_segments > 0 {
+        info!("Initializing Sherpa-ONNX engine...");
+        Some(get_or_init_sherpa_onnx(&app).await?)
     } else {
         None
     };
@@ -611,7 +624,14 @@ async fn run_import<R: Runtime>(
                 .transcribe_audio(segment.samples.clone())
                 .await
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32)
+            (text, 0.0f32)
+        } else if use_sherpa_onnx {
+            let sherpa_onnx = get_or_init_sherpa_onnx(&app).await
+                .map_err(|e| anyhow!("Sherpa-ONNX engine init failed: {}", e))?;
+            let result = sherpa_onnx.transcribe(segment.samples.clone(), None).await
+                .map_err(|e| anyhow!("Sherpa-ONNX transcription failed on segment {}: {}", i, e))?;
+            let conf = result.confidence.unwrap_or(0.0);
+            (result.text, conf)
         } else {
             let engine = whisper_engine.as_ref().unwrap();
             let (text, conf, _) = engine
@@ -909,6 +929,34 @@ async fn get_or_init_funasr<R: Runtime>(
 
     info!("FunASR engine initialized successfully");
     Ok(engine)
+}
+
+/// Get or initialize the Sherpa-ONNX engine (OnceLock, initialized once globally)
+async fn get_or_init_sherpa_onnx<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Arc<SherpaOnnxProvider>> {
+    if let Some(engine) = SHERPA_ONNX_ENGINE.get() {
+        return Ok(engine.clone());
+    }
+
+    let app_data_dir = app.path().app_data_dir()
+        .map_err(|e| anyhow!("Failed to get app data dir: {}", e))?;
+    let model_dir = app_data_dir.join("models").join("sherpa-onnx").join("sensevoice");
+
+    info!(
+        "Initializing Sherpa-ONNX engine from {}...",
+        model_dir.display()
+    );
+
+    let provider = SherpaOnnxProvider::new(&model_dir)
+        .map_err(|e| anyhow!("Failed to initialize Sherpa-ONNX engine: {}", e))?;
+    let provider = Arc::new(provider);
+
+    SHERPA_ONNX_ENGINE.set(provider.clone())
+        .map_err(|_| anyhow!("Sherpa-ONNX engine already initialized"))?;
+
+    info!("Sherpa-ONNX engine initialized successfully");
+    Ok(provider)
 }
 
 /// Get the configured model from database
