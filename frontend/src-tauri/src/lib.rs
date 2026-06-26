@@ -805,6 +805,9 @@ pub fn run() {
             // Sherpa-ONNX model management commands
             sherpa_onnx::commands::sherpa_onnx_scan_models,
             sherpa_onnx::commands::sherpa_onnx_validate_model,
+            // FunASR download commands
+            funasr_onnx::commands::funasr_download_model,
+            funasr_onnx::commands::funasr_cancel_download,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

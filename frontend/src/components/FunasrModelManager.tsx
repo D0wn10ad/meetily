@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { motion } from 'framer-motion';
 import { toast } from 'sonner';
+import { FunasrAPI, FunasrDownloadProgress } from '@/lib/funasr';
 
 interface FunasrModelEntry {
   name: string;
@@ -23,6 +25,9 @@ export function FunasrModelManager({
   const [models, setModels] = useState<FunasrModelEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloadStage, setDownloadStage] = useState('');
 
   // Scan for FunASR models on mount
   useEffect(() => {
@@ -58,6 +63,67 @@ export function FunasrModelManager({
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // Listen for download progress events
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+
+    const setupListener = async () => {
+      unlisten = await listen<FunasrDownloadProgress>(
+        'funasr:download-progress',
+        (event) => {
+          setDownloadProgress(event.payload.progress);
+          setDownloadStage(event.payload.status);
+        }
+      );
+    };
+
+    setupListener();
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  const handleDownload = useCallback(async () => {
+    setIsDownloading(true);
+    setDownloadProgress(0);
+    setDownloadStage('');
+
+    try {
+      await FunasrAPI.downloadModel();
+      // Download complete — rescan models
+      const result = await invoke<FunasrModelEntry[]>('api_scan_funasr_models');
+      setModels(result);
+      toast.success('FunASR model downloaded successfully', {
+        description: 'Paraformer model is ready to use',
+        duration: 4000
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Download failed';
+      toast.error('Failed to download FunASR model', {
+        description: message,
+        duration: 5000
+      });
+    } finally {
+      setIsDownloading(false);
+      setDownloadProgress(0);
+      setDownloadStage('');
+    }
+  }, []);
+
+  const handleCancelDownload = useCallback(async () => {
+    try {
+      await FunasrAPI.cancelDownload();
+      toast.info('Download cancelled', { duration: 3000 });
+    } catch (err) {
+      console.error('Failed to cancel download:', err);
+    } finally {
+      setIsDownloading(false);
+      setDownloadProgress(0);
+      setDownloadStage('');
+    }
   }, []);
 
   const selectModel = useCallback(async (modelName: string) => {
@@ -161,6 +227,43 @@ export function FunasrModelManager({
           <p className="text-xs text-gray-500 mt-2">
             Supported models: paraformer, paraformer-large, paraformer-8k, etc.
           </p>
+
+          {/* Download section */}
+          {!isDownloading ? (
+            <button
+              onClick={handleDownload}
+              disabled={isDownloading}
+              className="mt-3 w-full bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Download Paraformer Model (~700 MB)
+            </button>
+          ) : (
+            <div className="mt-3 space-y-2">
+              <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+                <motion.div
+                  className="h-full bg-gradient-to-r from-blue-500 to-blue-600 rounded-full"
+                  initial={{ width: 0 }}
+                  animate={{ width: `${downloadProgress}%` }}
+                  transition={{ duration: 0.3, ease: 'easeOut' }}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-gray-500">
+                  {downloadStage || 'Downloading...'}
+                </p>
+                <span className="text-xs font-semibold text-blue-600">
+                  {Math.round(downloadProgress)}%
+                </span>
+              </div>
+              <button
+                onClick={handleCancelDownload}
+                className="text-xs text-gray-600 hover:text-red-600 font-medium transition-colors"
+              >
+                Cancel download
+              </button>
+            </div>
+          )}
+
           <button
             onClick={() => {
               setLoading(true);

@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use ort::execution_providers::CPUExecutionProvider;
 use ort::inputs;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
@@ -35,7 +34,12 @@ impl FunasrModel {
         }
 
         log::info!("Loading FunASR Paraformer model from {}...", model_path.display());
-        let providers = vec![CPUExecutionProvider::default().build()];
+
+        let gpu_type = crate::audio::hardware_detector::HardwareProfile::detect().gpu_type;
+        let providers = crate::audio::onnx_provider::get_onnx_providers(gpu_type);
+        for p in &providers {
+            log::info!("  └─ EP: {:?}", p);
+        }
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_execution_providers(providers)?
@@ -162,5 +166,19 @@ mod tests {
         let result = FunasrModel::new(&dir);
         assert!(result.is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_session_creation_with_dynamic_providers() {
+        for gpu in [
+            crate::audio::hardware_detector::GpuType::None,
+            crate::audio::hardware_detector::GpuType::Metal,
+            crate::audio::hardware_detector::GpuType::Cuda,
+            crate::audio::hardware_detector::GpuType::Vulkan,
+            crate::audio::hardware_detector::GpuType::OpenCL,
+        ] {
+            let providers = crate::audio::onnx_provider::get_onnx_providers(gpu);
+            assert!(!providers.is_empty(), "Must always have at least CPU fallback for {:?}", gpu);
+        }
     }
 }

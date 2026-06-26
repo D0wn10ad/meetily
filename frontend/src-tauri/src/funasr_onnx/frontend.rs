@@ -207,13 +207,66 @@ fn apply_lfr(fbank: &[Vec<f32>]) -> Vec<Vec<f32>> {
 // CMVN (Cepstral Mean & Variance Normalisation)
 // ---------------------------------------------------------------------------
 
-/// Parse a Kaldi-binary CMVN file into (negative_means, inverse_stds).
+/// Parse a single vector from a text-format Kaldi CMVN section.
+///
+/// Matches FunASR Python `load_cmvn()`: finds `<{section_name}>`, then parses
+/// the next line's `<LearnRateCoef>` bracket-format values.
+fn parse_text_cmvn_vector(data: &[u8], section_name: &str) -> Result<Vec<f32>, FunasrError> {
+    let text = std::str::from_utf8(data).map_err(|_| {
+        FunasrError::InvalidCmvnFile("CMVN file is not valid UTF-8".into())
+    })?;
+
+    let header = format!("<{section_name}>");
+
+    let header_line_idx = text.lines().position(|line| line.trim().starts_with(&header)).ok_or_else(|| {
+        FunasrError::InvalidCmvnFile(format!("Missing '<{section_name}>' section in CMVN file"))
+    })?;
+
+    let val_line = text.lines().nth(header_line_idx + 1).ok_or_else(|| {
+        FunasrError::InvalidCmvnFile(format!(
+            "Expected '<LearnRateCoef>' after '<{section_name}>'"
+        ))
+    })?;
+
+    if !val_line.trim_start().starts_with("<LearnRateCoef>") {
+        return Err(FunasrError::InvalidCmvnFile(format!(
+            "Expected '<LearnRateCoef>' after '<{section_name}>', got: {}",
+            val_line.trim()
+        )));
+    }
+
+    // tokens layout: [0]="<LearnRateCoef>", [1]="0", [2]="[", [3..last-1]=floats, [last]="]"
+    let tokens: Vec<&str> = val_line.split_whitespace().collect();
+
+    if tokens.len() < 4 || tokens[2] != "[" || tokens[tokens.len() - 1] != "]" {
+        return Err(FunasrError::InvalidCmvnFile(format!(
+            "Expected bracket-format vector after '<{section_name}>', got {} tokens",
+            tokens.len()
+        )));
+    }
+
+    let values: Vec<f32> = tokens[3..tokens.len() - 1]
+        .iter()
+        .map(|&s| {
+            s.parse::<f32>().map_err(|e| {
+                FunasrError::InvalidCmvnFile(format!(
+                    "Failed to parse float '{}' in '<{section_name}>': {e}",
+                    s
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(values)
+}
+
+/// Parse a text-format Kaldi CMVN file into (negative_means, inverse_stds).
 ///
 /// The file is expected to contain an `<AddShift>` section (negative means)
 /// followed by a `<Rescale>` section (inverse standard deviations).
 fn parse_kaldi_cmvn(data: &[u8]) -> Result<(Vec<f32>, Vec<f32>), FunasrError> {
-    let means = read_kaldi_vector(data, b"AddShift")?;
-    let inv_stds = read_kaldi_vector(data, b"Rescale")?;
+    let means = parse_text_cmvn_vector(data, "AddShift")?;
+    let inv_stds = parse_text_cmvn_vector(data, "Rescale")?;
 
     if means.len() != FEAT_DIM {
         return Err(FunasrError::InvalidCmvnFile(format!(
@@ -229,55 +282,6 @@ fn parse_kaldi_cmvn(data: &[u8]) -> Result<(Vec<f32>, Vec<f32>), FunasrError> {
     }
 
     Ok((means, inv_stds))
-}
-
-/// Search for a Kaldi-binary vector inside `data` after the given ASCII token.
-///
-/// The token is found as a raw byte sub-sequence.  After the token the routine
-/// scans forward (up to 32 bytes) looking for a little-endian `u32` dimension
-/// that fits inside the remaining data, then reads that many `f32` values.
-fn read_kaldi_vector(data: &[u8], token: &[u8]) -> Result<Vec<f32>, FunasrError> {
-    let token_str = std::str::from_utf8(token).unwrap_or("?");
-
-    let pos = data
-        .windows(token.len())
-        .position(|w| w == token)
-        .ok_or_else(|| {
-            FunasrError::InvalidCmvnFile(format!("Missing '{token_str}' token in CMVN file"))
-        })?;
-
-    let after_token = &data[pos + token.len()..];
-
-    // Scan a reasonable window for the binary dimension
-    let scan_end = after_token.len().saturating_sub(4).min(32);
-
-    for offset in 0..scan_end {
-        let dim_bytes: [u8; 4] = match after_token[offset..offset + 4].try_into() {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let dim = u32::from_le_bytes(dim_bytes) as usize;
-
-        let data_start = offset + 4;
-        if dim > 0 && dim <= FEAT_DIM * 2 && data_start + dim * 4 <= after_token.len() {
-            let mut result = Vec::with_capacity(dim);
-            for i in 0..dim {
-                let off = data_start + i * 4;
-                let v = f32::from_le_bytes([
-                    after_token[off],
-                    after_token[off + 1],
-                    after_token[off + 2],
-                    after_token[off + 3],
-                ]);
-                result.push(v);
-            }
-            return Ok(result);
-        }
-    }
-
-    Err(FunasrError::InvalidCmvnFile(format!(
-        "Could not parse Kaldi vector after '{token_str}'"
-    )))
 }
 
 /// Apply CMVN normalisation to features.
@@ -511,19 +515,87 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_parse_kaldi_cmvn_rejects_junk() {
-        let junk = b"this is not a valid cmvn file";
-        assert!(parse_kaldi_cmvn(junk).is_err());
+    // -----------------------------------------------------------------------
+    // Text-format CMVN parser tests
+    // -----------------------------------------------------------------------
+
+    /// Generate a valid 560-dim AddShift text line for use in tests.
+    fn make_addshift_line() -> String {
+        let vals: Vec<String> = (0..560).map(|i| format!("{}", -0.5 - i as f32 * 0.001)).collect();
+        format!("<LearnRateCoef> 0 [ {} ]", vals.join(" "))
+    }
+
+    /// Generate a valid 560-dim Rescale text line for use in tests.
+    fn make_rescale_line() -> String {
+        let vals: Vec<String> = (0..560).map(|i| format!("{}", 0.1 + i as f32 * 0.0005)).collect();
+        format!("<LearnRateCoef> 0 [ {} ]", vals.join(" "))
+    }
+
+    fn make_full_cmvn_text() -> String {
+        format!(
+            "<Nnet>\n<Splice> 560 560\n[ 0 ]\n<AddShift> 560 560\n{}\n<Rescale> 560 560\n{}\n</Nnet>\n",
+            make_addshift_line(),
+            make_rescale_line(),
+        )
     }
 
     #[test]
-    fn test_parse_kaldi_cmvn_empty() {
-        assert!(parse_kaldi_cmvn(b"").is_err());
+    fn test_parse_text_cmvn_valid() {
+        let data = make_full_cmvn_text();
+        let vec = parse_text_cmvn_vector(data.as_bytes(), "AddShift").unwrap();
+        assert_eq!(vec.len(), 560);
+        let expected_first = -0.5;
+        assert!((vec[0] - expected_first).abs() < 1e-5);
+        let expected_last = -0.5 - 559.0 * 0.001;
+        assert!((vec[559] - expected_last).abs() < 1e-5);
     }
 
     #[test]
-    fn test_kaldi_vector_not_found() {
-        assert!(read_kaldi_vector(b"no token here", b"AddShift").is_err());
+    fn test_parse_text_cmvn_missing_section() {
+        let data = b"<Nnet>\n<SomethingElse> 560 560\n<LearnRateCoef> 0 [ 1.0 2.0 ]\n</Nnet>";
+        let result = parse_text_cmvn_vector(data, "AddShift");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("AddShift"), "error should mention AddShift: {err}");
+    }
+
+    #[test]
+    fn test_parse_text_cmvn_wrong_dim() {
+        let data = b"<AddShift> 560 560\n<LearnRateCoef> 0 [ 1.0 2.0 3.0 ]\n<Rescale> 560 560\n<LearnRateCoef> 0 [ 4.0 5.0 6.0 ]\n";
+        // parse_text_cmvn_vector doesn't check dim — should return 3 floats
+        let vec = parse_text_cmvn_vector(data, "AddShift").unwrap();
+        assert_eq!(vec.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_text_cmvn_invalid_float() {
+        let data = b"<AddShift> 560 560\n<LearnRateCoef> 0 [ 1.0 xyz 3.0 ]\n";
+        let result = parse_text_cmvn_vector(data, "AddShift");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("xyz"), "error should mention 'xyz': {err}");
+    }
+
+    #[test]
+    fn test_parse_text_cmvn_non_utf8() {
+        let data = vec![0xff, 0xfe, 0x00, 0x01]; // invalid UTF-8 bytes
+        let result = parse_text_cmvn_vector(&data, "AddShift");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("UTF-8") || err.contains("valid"), "error should mention UTF-8: {err}");
+    }
+
+    #[test]
+    fn test_parse_text_cmvn_end_to_end() {
+        let data = make_full_cmvn_text();
+        let (means, inv_stds) = parse_kaldi_cmvn(data.as_bytes()).unwrap();
+        assert_eq!(means.len(), 560);
+        assert_eq!(inv_stds.len(), 560);
+        // Spot-check AddShift first value
+        let expected_means_0 = -0.5;
+        assert!((means[0] - expected_means_0).abs() < 1e-5);
+        // Spot-check Rescale first value
+        let expected_inv_0 = 0.1;
+        assert!((inv_stds[0] - expected_inv_0).abs() < 1e-5);
     }
 }

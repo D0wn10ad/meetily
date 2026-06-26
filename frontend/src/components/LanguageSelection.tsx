@@ -118,7 +118,7 @@ interface LanguageSelectionProps {
   selectedLanguage: string;
   onLanguageChange: (language: string) => void;
   disabled?: boolean;
-  provider?: 'localWhisper' | 'parakeet' | 'sherpa-onnx' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+  provider?: 'localWhisper' | 'parakeet' | 'funasr' | 'sherpa-onnx' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
 }
 
 export function LanguageSelection({
@@ -130,10 +130,11 @@ export function LanguageSelection({
   const [saving, setSaving] = useState(false);
   const { setSelectedLanguage } = useConfig();
 
-  // Parakeet and Sherpa-ONNX only support auto-detection (doesn't support manual language selection)
+  // Parakeet, FunASR, and Sherpa-ONNX only support auto-detection (doesn't support manual language selection)
   const isParakeet = provider === 'parakeet';
+  const isFunasr = provider === 'funasr';
   const isSherpaOnnx = provider === 'sherpa-onnx';
-  const isAutoDetectOnly = isParakeet || isSherpaOnnx;
+  const isAutoDetectOnly = isParakeet || isFunasr || isSherpaOnnx;
   const availableLanguages = isAutoDetectOnly
     ? LANGUAGES.filter(lang => lang.code === 'auto' || lang.code === 'auto-translate')
     : LANGUAGES;

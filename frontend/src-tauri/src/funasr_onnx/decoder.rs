@@ -5,17 +5,41 @@ const SOS_ID: usize = 1;
 const EOS_ID: usize = 2;
 const VOCAB_SIZE: usize = 8404;
 
+/// Post-process decoded text by removing artifacts and cleaning up.
+///
+/// Current operations:
+/// - Removes BPE/SentencePiece `@@` continuation markers (merges subword pieces)
+/// - Removes special token substrings (`<s>`, `</s>`, `<unk>`, `<blank>`)
+///
+/// This function is intended as the single extension point for future
+/// post-processing features (e.g. automatic punctuation restoration,
+/// spacing normalization, inverse text normalization).
+fn postprocess(text: &str) -> String {
+    // 1. Strip BPE continuation markers (WordPiece/SentencePiece convention)
+    //    e.g. "sc@@al@@e" → "scale"
+    let text = text.replace("@@", "");
+    
+    // 2. Remove special token substrings
+    let text = text
+        .replace("<s>", "")
+        .replace("</s>", "")
+        .replace("<unk>", "")
+        .replace("<blank>", "");
+    
+    // 3. Normalize whitespace and trim
+    let text = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    
+    text.trim().to_string()
+}
+
 /// Decode model output logits into text.
 ///
-/// # Arguments
-///
-/// * `logits` - Flat `Vec<f32>`, shape `(T, vocab_size)` where `vocab_size = 8404`.
-/// * `token_num` - Predicted valid token count from the model output.
-/// * `token_list` - Vocabulary loaded from `tokens.json`.
-///
-/// # Returns
-///
-/// Decoded text string.
+/// BPE subword pieces (ending with `@@`) are merged during token lookup.
+/// The result is then passed through [`postprocess()`] for cleanup
+/// (special token removal, BPE artifact stripping).
 pub fn decode(
     logits: &[f32],
     token_num: i32,
@@ -60,22 +84,24 @@ pub fn decode(
     let selected = &filtered[..valid_len];
 
     // 5. Token lookup
-    let mut decoded = String::new();
-    for &token_id in selected {
-        if token_id < token_list.len() {
-            decoded.push_str(&token_list[token_id]);
-        } else {
-            log::warn!("FunASR decode: token {} out of range (vocab size {})", token_id, token_list.len());
+        let mut decoded = String::new();
+        for &token_id in selected {
+            if token_id < token_list.len() {
+                let token = &token_list[token_id];
+                // Strip BPE continuation marker @@ during concatenation
+                // so subword pieces merge properly: "sc@@" + "al@@" + "e" → "scale"
+                if let Some(stripped) = token.strip_suffix("@@") {
+                    decoded.push_str(stripped);
+                } else {
+                    decoded.push_str(token);
+                }
+            } else {
+                log::warn!("FunASR decode: token {} out of range (vocab size {})", token_id, token_list.len());
+            }
         }
-    }
 
-    // 6. Post-processing: remove any remaining special token substrings
-    let result = decoded
-        .replace("<s>", "")
-        .replace("</s>", "")
-        .replace("<unk>", "")
-        .replace("<blank>", "");
-    let result = result.trim().to_string();
+    // 6. Post-processing
+    let result = postprocess(&decoded);
 
     log::info!("FunASR decode: {} logit frames, {} raw tokens → {} filtered tokens → '{}'", num_frames, tokens.len(), filtered.len(), result);
 
@@ -177,5 +203,43 @@ mod tests {
             }
             _ => panic!("Expected DecodeError"),
         }
+    }
+
+    #[test]
+    fn test_bpe_decode() {
+        // Test BPE @@ merging during token lookup
+        let mut tokens = vec![String::new(); 8404];
+        tokens[1] = "<s>".to_string();
+        tokens[2] = "</s>".to_string();
+        tokens[3] = "hel@@".to_string();
+        tokens[4] = "lo".to_string();  
+        tokens[5] = "world".to_string();
+        tokens[8] = "sc@@".to_string();
+        tokens[9] = "al@@".to_string();
+        tokens[10] = "e".to_string();
+        
+        let mut logits = vec![0.0f32; 6 * 8404];
+        logits[0 * 8404 + 1] = 10.0;  // sos
+        logits[1 * 8404 + 3] = 10.0;  // hel@@
+        logits[2 * 8404 + 4] = 10.0;  // lo
+        logits[3 * 8404 + 5] = 10.0;  // world
+        logits[4 * 8404 + 8] = 10.0;  // sc@@
+        logits[5 * 8404 + 9] = 10.0;  // al@@ (only 2 pieces, missing 'e' to keep test short)
+        
+        let result = decode(&logits, 5, &tokens).unwrap();
+        // "hel@@lo" -> "hello", "world" -> "world", "sc@@" -> "sc", "al@@" -> "al"
+        // After postprocess: "hello worldscal" or similar
+        assert!(result.contains("hello"), "Expected 'hello' in result, got: {}", result);
+        assert!(result.contains("world"), "Expected 'world' in result, got: {}", result);
+        // @@ markers should NOT appear
+        assert!(!result.contains("@@"), "result should not contain @@: {}", result);
+    }
+
+    #[test]
+    fn test_postprocess_strips_artifacts() {
+        assert_eq!(postprocess("sc@@al@@e"), "scale");
+        assert_eq!(postprocess("pro@@ce@@ss@@or"), "processor");
+        assert_eq!(postprocess("hello<s></s>"), "hello");
+        assert_eq!(postprocess("  hello   world  "), "hello world");
     }
 }

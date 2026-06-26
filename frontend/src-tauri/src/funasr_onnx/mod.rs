@@ -34,3 +34,6 @@ pub use decoder::*;
 
 pub mod engine;
 pub use engine::FunasrEngine;
+
+pub mod commands;
+pub use commands::*;
