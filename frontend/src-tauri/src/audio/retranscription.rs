@@ -374,7 +374,7 @@ async fn run_retranscription<R: Runtime>(
     };
     let sherpa_onnx_engine = if use_sherpa_onnx {
         info!("Initializing Sherpa-ONNX engine...");
-        Some(get_or_init_sherpa_onnx(&app).await?)
+        Some(get_or_init_sherpa_onnx(&app, model.as_deref()).await?)
     } else {
         None
     };
@@ -462,7 +462,7 @@ async fn run_retranscription<R: Runtime>(
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
             (text, 0.0f32)
         } else if use_sherpa_onnx {
-            let sherpa_onnx = get_or_init_sherpa_onnx(&app).await
+            let sherpa_onnx = get_or_init_sherpa_onnx(&app, model.as_deref()).await
                 .map_err(|e| anyhow!("Sherpa-ONNX engine init failed: {}", e))?;
             let result = sherpa_onnx.transcribe(segment.samples.clone(), None).await
                 .map_err(|e| anyhow!("Sherpa-ONNX transcription failed on segment {}: {}", i, e))?;
@@ -899,6 +899,7 @@ async fn get_or_init_funasr<R: Runtime>(
 /// Get or initialize the Sherpa-ONNX engine (OnceLock, initialized once globally)
 async fn get_or_init_sherpa_onnx<R: Runtime>(
     app: &AppHandle<R>,
+    model: Option<&str>,
 ) -> Result<Arc<SherpaOnnxProvider>> {
     if let Some(engine) = SHERPA_ONNX_ENGINE.get() {
         return Ok(engine.clone());
@@ -906,7 +907,8 @@ async fn get_or_init_sherpa_onnx<R: Runtime>(
 
     let app_data_dir = app.path().app_data_dir()
         .map_err(|e| anyhow!("Failed to get app data dir: {}", e))?;
-    let model_dir = app_data_dir.join("models").join("sherpa-onnx").join("sensevoice");
+    let model_name = model.unwrap_or("sensevoice");
+    let model_dir = app_data_dir.join("models").join("sherpa-onnx").join(model_name);
 
     info!(
         "Initializing Sherpa-ONNX engine from {}...",
