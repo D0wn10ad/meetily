@@ -8,6 +8,10 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 llama-cpp-2 = "=0.1.146"
+# Pin the sys crate to the exact matching version: llama-cpp-2 0.1.146 declares
+# llama-cpp-sys-2 = "0.1.146" as a caret requirement, so unpinned resolution
+# drifts to 0.1.150 and fails to compile (removed API symbols).
+llama-cpp-sys-2 = "=0.1.146"
 encoding_rs = "0.8"
 
 [features]
