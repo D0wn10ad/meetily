@@ -12,10 +12,10 @@ on:
           - release
         default: release
       sign-build:
-        description: 'Sign the build'
+        description: 'Sign the build (requires DigiCert KeyLocker secrets; false = unsigned, no secrets needed)'
         required: true
         type: boolean
-        default: true
+        default: false
       test-signing:
         description: 'Run pre-build signing test (optional)'
         required: false
@@ -512,14 +512,21 @@ jobs:
 
           $buildDirectory = "target/x86_64-pc-windows-msvc/$env:PORTABLE_BUILD_PROFILE"
           $configPath = (Join-Path $env:RUNNER_TEMP "tauri.windows-portable.conf.json").Replace('\', '/')
-          @{
+          $override = @{
             build = @{
               beforeBundleCommand = @{
                 script = "node .github/verify-portable-ggml.cjs $buildDirectory"
                 cwd = $env:GITHUB_WORKSPACE
               }
             }
-          } | ConvertTo-Json -Depth 4 | Set-Content -Path $configPath -Encoding utf8
+          }
+          if ('${{ github.event.inputs.sign-build }}' -ne 'true') {
+            # Unsigned build: disable updater artifacts so TAURI_SIGNING_PRIVATE_KEY is not required.
+            # Installer signing is already a no-op: sign-windows.ps1 skips when DIGICERT_KEYPAIR_ALIAS is unset.
+            $override.bundle = @{ createUpdaterArtifacts = $false }
+            Write-Host "Unsigned build: createUpdaterArtifacts disabled (no updater signing key required)"
+          }
+          $override | ConvertTo-Json -Depth 4 | Set-Content -Path $configPath -Encoding utf8
           "args=--config `"$configPath`"" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Rust cache
