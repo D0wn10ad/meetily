@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use log::{error, info, warn};
+use log::{error, info};
 use std::path::Path;
 
 use super::provider::{TranscriptResult, TranscriptionError, TranscriptionProvider};

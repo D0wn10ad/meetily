@@ -373,7 +373,7 @@ async fn run_retranscription<R: Runtime>(
     } else {
         None
     };
-    let sherpa_onnx_engine = if use_sherpa_onnx {
+    let _sherpa_onnx_engine = if use_sherpa_onnx {
         info!("Initializing Sherpa-ONNX engine...");
         Some(get_or_init_sherpa_onnx(&app, model.as_deref()).await?)
     } else {

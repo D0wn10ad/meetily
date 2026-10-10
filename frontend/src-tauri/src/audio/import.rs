@@ -539,7 +539,7 @@ async fn run_import<R: Runtime>(
     } else {
         None
     };
-    let sherpa_onnx_engine = if use_sherpa_onnx && total_segments > 0 {
+    let _sherpa_onnx_engine = if use_sherpa_onnx && total_segments > 0 {
         info!("Initializing Sherpa-ONNX engine...");
         Some(get_or_init_sherpa_onnx(&app, model.as_deref()).await?)
     } else {
