@@ -442,6 +442,11 @@ jobs:
           projectPath: frontend
           args: ${{ matrix.args }} ${{ steps.build-features.outputs.features }} ${{ steps.windows-portability.outputs.args }}
 
+      - name: Verify Windows DLL linking
+        if: contains(matrix.platform, 'windows')
+        shell: pwsh
+        run: pwsh -File ./.github/verify-windows-dlls.ps1
+
       # Linux post-build processing
       - name: Remove libwayland-client.so from AppImage
         if: contains(matrix.platform, 'ubuntu-24.04')

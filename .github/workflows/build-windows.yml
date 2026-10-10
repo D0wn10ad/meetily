@@ -718,6 +718,10 @@ jobs:
           projectPath: frontend
           args: --target x86_64-pc-windows-msvc ${{ steps.build-profile.outputs.args }} ${{ steps.windows-portability.outputs.args }}
 
+      - name: Verify Windows DLL linking
+        shell: pwsh
+        run: pwsh -File ./.github/verify-windows-dlls.ps1
+
       - name: Verify build artifacts
         shell: bash
         run: |
