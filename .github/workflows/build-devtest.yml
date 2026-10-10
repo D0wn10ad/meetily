@@ -339,10 +339,10 @@ jobs:
         run: |
           FEATURES=""
 
-          # Windows: Use Vulkan for GPU acceleration
+          # Windows: CPU-only (Vulkan build blocked by MSVC long-path limit)
           if [[ "${{ matrix.platform }}" == *"windows"* ]]; then
-            FEATURES="--features vulkan"
-            echo "Windows build with Vulkan GPU acceleration"
+            FEATURES=""
+            echo "Windows build (CPU-only)"
           fi
 
           # Linux: Use OpenBLAS for optimized CPU performance
@@ -369,8 +369,8 @@ jobs:
             LLAMA_FEATURES="--features metal"
             echo "Using Metal GPU acceleration for macOS"
           elif [[ "${{ matrix.platform }}" == *"windows"* ]]; then
-            LLAMA_FEATURES="--features vulkan"
-            echo "Using Vulkan GPU acceleration for Windows"
+            LLAMA_FEATURES=""
+            echo "Using CPU-only mode for Windows (Vulkan build has CMake race condition issues with llama-cpp-sys-2)"
           else
             echo "Using CPU-only mode for Linux"
           fi
