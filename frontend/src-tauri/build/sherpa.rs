@@ -10,6 +10,27 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
+/// Locates `sherpa-onnx-c-api.dll` inside sherpa-onnx-sys's prebuilt cache
+/// (`<target>/sherpa-onnx-prebuilt/<archive>/lib/`), preferring the shared
+/// archive. Returns None if not found.
+fn find_prebuilt_dll(target_dir: &Path) -> Option<std::path::PathBuf> {
+    let prebuilt = target_dir.join("sherpa-onnx-prebuilt");
+    let mut shared: Option<std::path::PathBuf> = None;
+    let mut any: Option<std::path::PathBuf> = None;
+    for entry in std::fs::read_dir(&prebuilt).ok()?.flatten() {
+        let lib = entry.path().join("lib").join("sherpa-onnx-c-api.dll");
+        if lib.exists() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.contains("shared") {
+                shared = Some(lib);
+            } else if any.is_none() {
+                any = Some(lib);
+            }
+        }
+    }
+    shared.or(any)
+}
+
 /// Copies `sherpa-onnx-c-api.dll` from the cargo profile dir into
 /// `binaries/sherpa/` so Tauri bundles it as a resource. Windows-only;
 /// a no-op on every other target OS.
@@ -27,6 +48,19 @@ pub fn stage_sherpa_dlls() {
         .ancestors()
         .find(|p| p.file_name() == Some(OsStr::new(&profile)))
         .expect("could not resolve cargo profile dir from OUT_DIR");
+
+    // Cargo target dir: <target>/<triple>/<profile> (with --target) or
+    // <target>/<profile> (without). The sherpa-onnx-sys prebuilt cache lives
+    // at <target>/sherpa-onnx-prebuilt.
+    let target_dir = profile_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .filter(|p| p.file_name() == Some(OsStr::new("target")))
+        .unwrap_or_else(|| {
+            profile_dir
+                .parent()
+                .expect("could not resolve cargo target dir from OUT_DIR")
+        });
 
     let src = profile_dir.join("sherpa-onnx-c-api.dll");
     let dst_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries/sherpa");
@@ -62,13 +96,30 @@ pub fn stage_sherpa_dlls() {
                 dst.display()
             );
         } else {
-            panic!(
-                "failed to stage sherpa-onnx-c-api.dll: source {} not found ({}). \
-                 The sherpa-onnx `shared` feature appears to be inactive on Windows \
-                 (expected it in Cargo.toml target cfg for windows).",
-                src.display(),
-                err
-            );
+            // The profile-dir copy can be missing when the rust-cache restore
+            // is partial (sherpa-onnx-sys's build script is cached and does not
+            // re-copy its runtime DLLs). Fall back to the prebuilt cache.
+            if let Some(prebuilt_src) = find_prebuilt_dll(&target_dir) {
+                if let Err(fb_err) = std::fs::copy(&prebuilt_src, &dst) {
+                    panic!(
+                        "failed to stage sherpa-onnx-c-api.dll from prebuilt cache {}: {}",
+                        prebuilt_src.display(),
+                        fb_err
+                    );
+                }
+                println!(
+                    "cargo:warning=staged sherpa-onnx-c-api.dll from prebuilt cache {}",
+                    prebuilt_src.display()
+                );
+            } else {
+                panic!(
+                    "failed to stage sherpa-onnx-c-api.dll: source {} not found ({}). \
+                     The sherpa-onnx `shared` feature appears to be inactive on Windows \
+                     (expected it in Cargo.toml target cfg for windows).",
+                    src.display(),
+                    err
+                );
+            }
         }
     }
 }
