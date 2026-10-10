@@ -28,6 +28,49 @@ if (-not (Test-Path $sherpaDll)) {
 }
 Write-Host "PASS: staged $sherpaDll"
 
+# Return the human-readable file names contained in an installer. WiX MSIs name
+# their cab payload entries with generic keys (PathFile_I<uuid>), so 7-Zip's
+# listing is useless — the real names live in the MSI 'File' table. NSIS .exe
+# archives store real names, but we still extract + enumerate for robustness.
+function Get-InstallerFileNames([string]$InstallerPath) {
+    $names = [System.Collections.Generic.List[string]]::new()
+    $tempBase = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
+    $tmp = Join-Path $tempBase ("installer-inspect-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+
+    if ($InstallerPath -match '\.msi$') {
+        try {
+            $installer = New-Object -ComObject WindowsInstaller.Installer
+            $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($InstallerPath, 0))
+            $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('SELECT `FileName` FROM `File`'))
+            $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+            while ($true) {
+                $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+                if ($null -eq $rec) { break }
+                $names.Add([string]$rec.GetType().InvokeMember('StringData', 'InvokeMethod', $null, $rec, @(1)))
+            }
+            $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null)
+        } catch {
+            Write-Warning "MSI File table query failed for $InstallerPath ($_); falling back to msiexec administrative extract."
+            $names.Clear()
+            $p = Start-Process msiexec -ArgumentList @('/a', "`"$InstallerPath`"", '/qn', "TARGETDIR=`"$tmp`"") -Wait -PassThru
+            if ($p.ExitCode -eq 0) {
+                Get-ChildItem -Path $tmp -Recurse -File -ErrorAction SilentlyContinue |
+                    ForEach-Object { $names.Add($_.Name) }
+            }
+        }
+    } elseif ($InstallerPath -match '\.exe$') {
+        & 7z x -y "-o$tmp" -- $InstallerPath | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Get-ChildItem -Path $tmp -Recurse -File -ErrorAction SilentlyContinue |
+                ForEach-Object { $names.Add($_.Name) }
+        }
+    }
+
+    Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    return $names
+}
+
 # --- 2. Installer bundles must contain the DLLs ------------------------------
 $installers = @()
 if (Test-Path $targetDir) {
@@ -46,18 +89,13 @@ if ($installers.Count -eq 0) {
     } else {
         foreach ($installer in $installers) {
             Write-Host "Inspecting installer: $($installer.FullName)"
-            $listing = (& 7z l -- $installer.FullName 2>&1 | Out-String)
-            if ($LASTEXITCODE -ne 0) {
-                Fail "7z failed (exit $LASTEXITCODE) listing $($installer.FullName)"
-            }
-            $lines = $listing -split "`r?`n"
-
-            $sherpaHits = @($lines | Where-Object { $_ -match 'sherpa-onnx-c-api\.dll' })
+            $names = @(Get-InstallerFileNames $installer.FullName)
+            $sherpaHits = @($names | Where-Object { $_ -match 'sherpa-onnx-c-api\.dll' })
             if ($sherpaHits.Count -lt 1) {
                 Fail "installer $($installer.Name) does not bundle sherpa-onnx-c-api.dll"
             }
 
-            $ortHits = @($lines | Where-Object { $_ -match 'onnxruntime\.dll' })
+            $ortHits = @($names | Where-Object { $_ -match 'onnxruntime\.dll' })
             if ($ortHits.Count -ne 1) {
                 Fail "installer $($installer.Name) must contain exactly 1 onnxruntime.dll, found $($ortHits.Count)"
             }
