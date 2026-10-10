@@ -722,6 +722,7 @@ jobs:
           }
           tar -xjf $archivePath -C $dest
           $libDir = Join-Path $dest "sherpa-onnx-v1.13.3-win-x64-shared-MT-Release-lib/lib"
+          $libDir = (Resolve-Path $libDir).Path
           "SHERPA_ONNX_LIB_DIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build Tauri app
