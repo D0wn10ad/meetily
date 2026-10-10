@@ -7,7 +7,13 @@
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$targetDir = Join-Path $repoRoot 'frontend/src-tauri/target'
+$rootTarget = Join-Path $repoRoot 'target'
+$legacyTarget = Join-Path $repoRoot 'frontend/src-tauri/target'
+if (Test-Path $rootTarget) {
+    $targetDir = $rootTarget
+} else {
+    $targetDir = $legacyTarget
+}
 $sherpaDll = Join-Path $repoRoot 'frontend/src-tauri/binaries/sherpa/sherpa-onnx-c-api.dll'
 $ortDll = Join-Path $repoRoot 'frontend/src-tauri/binaries/onnxruntime/onnxruntime.dll'
 
