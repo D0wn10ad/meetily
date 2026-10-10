@@ -9,30 +9,29 @@ CI chooses acceleration by platform while keeping Windows release assets portabl
 | Platform | Acceleration | Technology | Distribution baseline |
 | --- | --- | --- | --- |
 | **macOS** | GPU | Metal by default; CoreML available on Apple Silicon | Apple Silicon build target |
-| **Windows** | GPU | Vulkan | AVX2-capable x64 CPU; AVX-512 disabled |
+| **Windows** | CPU only | CPU-optimized Whisper | AVX2-capable x64 CPU; AVX-512 disabled |
 | **Linux** | CPU optimized in CI | OpenBLAS | Source-build configuration |
 
-Windows release packages use Vulkan-enabled Whisper. They do not automatically select CUDA. CUDA requires NVIDIA hardware, the CUDA toolkit, and an appropriately configured source build. The Vulkan SDK is a native-build prerequisite and is separate from frontend dependency installation with pnpm.
+Windows release packages use a CPU-only Whisper build. They do not automatically select CUDA. GPU acceleration (CUDA or Vulkan) requires the appropriate hardware, SDK/toolkit, and an appropriately configured source build; native-build prerequisites are separate from frontend dependency installation with pnpm.
 
 ## Windows Package Configuration (Enabled)
 
-### 1. Windows Builds (Vulkan GPU)
+### 1. Windows Builds (CPU-Only Whisper)
 
 ```yaml
-args: --target x86_64-pc-windows-msvc --features vulkan
+args: --target x86_64-pc-windows-msvc
 ```
 
 **What this provides:**
 
-- Vulkan-enabled Whisper for Windows packages.
-- Compatibility with Vulkan-capable AMD, Intel, and NVIDIA hardware.
+- A CPU-only Whisper build for Windows packages.
+- Compatibility with any AVX2-capable x64 CPU (no GPU requirement).
 - A repeatable CI configuration instead of a package specialized for the CI runner.
 
 **How it works:**
 
-- CI installs Vulkan SDK `1.4.309.0` and validates its environment before building.
-- The Tauri build enables the Vulkan feature for Windows.
-- The packaged artifact remains Vulkan-based; CUDA is a source-build choice.
+- The Tauri build selects no acceleration feature for Windows, producing a CPU-only Whisper build.
+- The workflow's retained Vulkan SDK install/verify steps are inert for this package build; GPU acceleration (CUDA or Vulkan) is a source-build choice.
 
 ### 2. Windows CPU Portability
 
@@ -80,8 +79,8 @@ Metal is enabled by default for macOS builds. Apple Silicon builds can also use 
 
 When building Windows, the shared workflow:
 
-- Enables the Vulkan feature.
-- Installs and validates Vulkan SDK `1.4.309.0`.
+- Selects no acceleration feature (CPU-only Whisper).
+- Still installs and validates Vulkan SDK `1.4.309.0` (retained but unused by the CPU-only package build).
 - Applies the portable CMake hook and `x86-64-v2` Rust target.
 - Uses the `windows-portable-v1` cache prefix.
 - Runs the pre-bundle Whisper verification.
@@ -90,19 +89,18 @@ For Linux builds, it can enable OpenBLAS. macOS uses Metal by default.
 
 ### 2. `build-devtest.yml` (Windows DevTest)
 
-The Windows DevTest path applies the same portable CMake hook, Rust target, cache prefix, Vulkan setup, and pre-bundle verification as a release build. Keep those safeguards in place when changing DevTest behavior.
+The Windows DevTest path applies the same portable CMake hook, Rust target, cache prefix, and pre-bundle verification as a release build, and builds CPU-only Whisper. Keep those safeguards in place when changing DevTest behavior.
 
 ### 3. `build-windows.yml` (Standalone Windows)
 
-The standalone Windows workflow uses the Vulkan feature and applies the same portability safeguards before packaging. A change is incomplete if it updates only the shared workflow or only this standalone workflow.
+The standalone Windows workflow builds CPU-only Whisper and applies the same portability safeguards before packaging. A change is incomplete if it updates only the shared workflow or only this standalone workflow.
 
 ## Verification
 
 ### How to Verify a Windows Package Build
 
 1. **Check the workflow configuration**
-   - Windows build arguments include `--features vulkan`.
-   - Vulkan SDK `1.4.309.0` is installed and validated.
+   - Windows build arguments select no acceleration feature (CPU-only Whisper).
    - `CMAKE_PROJECT_INCLUDE` uses the portable hook.
    - Rust uses `-C target-cpu=x86-64-v2`.
 
@@ -133,9 +131,9 @@ hipblas = ["whisper-rs/hipblas"]
 openblas = ["whisper-rs/openblas"]
 ```
 
-### Why Windows CI Uses Vulkan Instead of CUDA
+### Why Windows CI Ships a CPU-Only Whisper
 
-CUDA needs compatible NVIDIA hardware, drivers, and the CUDA toolkit. The standard Windows package instead uses Vulkan so CI can produce one configured artifact without selecting CUDA for end users. Contributors who need CUDA should create a compatible source build.
+The Vulkan feature is disabled on Windows: whisper.cpp's ggml-vulkan sub-build exceeds the MSVC 260-character path limit and fails inside CI. Shipping CPU-only Whisper lets CI produce one configured artifact without selecting CUDA for end users. Contributors who need CUDA or Vulkan acceleration should create a compatible source build.
 
 ### Linux Source Builds
 
@@ -143,11 +141,10 @@ OpenBLAS is appropriate for Linux CI runners without a GPU. For local Linux deve
 
 ## Troubleshooting
 
-### Build Fails with a Windows Vulkan Error
+### Windows Native Build Fails in CI
 
-- Confirm the Vulkan SDK installation and environment-validation steps completed.
-- Confirm the workflow still uses SDK `1.4.309.0`.
-- pnpm installation does not install or repair the Vulkan SDK.
+- The Windows package build is CPU-only: the Vulkan feature is disabled because whisper.cpp's ggml-vulkan sub-build exceeds the MSVC 260-character path limit.
+- Do not re-enable `--features vulkan` on Windows until that native-build issue is resolved.
 
 ### Portability Verification Fails
 
@@ -155,7 +152,7 @@ Treat the failure as a packaging blocker. Inspect the generated Whisper CMake ca
 
 ### CUDA Is Needed
 
-Use a compatible NVIDIA source-build environment with the CUDA toolkit. The standard Windows installer intentionally remains the Vulkan build.
+Use a compatible NVIDIA source-build environment with the CUDA toolkit. The standard Windows installer is a CPU-only build; CUDA and Vulkan are source-build options.
 
 ## Related Documentation
 
@@ -166,7 +163,7 @@ Use a compatible NVIDIA source-build environment with the CUDA toolkit. The stan
 
 ## Summary
 
-- Windows packages use Vulkan-enabled Whisper, retain AVX2, and disable AVX-512.
-- The portable CMake hook, Rust target, cache prefix, Vulkan setup, and pre-bundle verification work together; preserve them as a unit.
+- Windows packages use a CPU-only Whisper build, retain AVX2, and disable AVX-512.
+- The portable CMake hook, Rust target, cache prefix, and pre-bundle verification work together; preserve them as a unit.
 - CUDA remains an appropriately configured source-build option.
 - Linux remains source-built; macOS uses Metal by default.

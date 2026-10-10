@@ -108,7 +108,7 @@ Whether you're a defense consultant, enterprise executive, legal professional, o
 1. Download the latest `x64-setup.exe` from [Releases](https://github.com/Zackriya-Solutions/meeting-minutes/releases/latest)
 2. Run the installer
 
-> **Windows compatibility:** The packaged installer uses a Vulkan-enabled Whisper build. It requires an AVX2-capable x64 CPU; AVX-512 is not required. CUDA acceleration requires a source build configured with a compatible NVIDIA CUDA toolchain.
+> **Windows compatibility:** The packaged installer uses a CPU-only Whisper build. It requires an AVX2-capable x64 CPU; AVX-512 is not required. GPU acceleration (CUDA or Vulkan) requires a source build configured with the appropriate toolchain.
 
 ### 🍎 **macOS**
 
@@ -194,7 +194,7 @@ Capture microphone and system audio simultaneously with intelligent ducking and 
 Acceleration depends on the platform and build you use:
 
 - **macOS packages:** Metal and CoreML are enabled automatically.
-- **Windows packages:** Whisper is built with Vulkan support.
+- **Windows packages:** Whisper ships as a CPU-only build.
 - **Linux:** Build from source with the acceleration configuration appropriate for your system.
 
 CUDA is available through an appropriately configured NVIDIA source build; the standard Windows installer does not select it automatically.
