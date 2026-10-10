@@ -55,6 +55,12 @@ pub fn stage_sherpa_dlls() {
                 err,
                 dst.display()
             );
+        } else if profile == "debug" {
+            println!(
+                "cargo:warning=debug build: no sherpa-onnx-c-api.dll at {} and no staged copy at {}; skipping sherpa staging",
+                src.display(),
+                dst.display()
+            );
         } else {
             panic!(
                 "failed to stage sherpa-onnx-c-api.dll: source {} not found ({}). \
