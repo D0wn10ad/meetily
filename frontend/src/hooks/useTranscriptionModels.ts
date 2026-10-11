@@ -18,12 +18,14 @@ interface FunasrModelEntry {
   name: string;
   path: string;
   valid: boolean;
+  size_mb: number;
 }
 
 interface SherpaOnnxModelEntry {
   name: string;
   path: string;
   valid: boolean;
+  size_mb: number;
 }
 
 interface TranscriptModelConfig {
@@ -98,7 +100,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
           provider: 'funasr' as const,
           name: m.name,
           displayName: `🎯 FunASR (Paraformer): ${m.name}`,
-          size_mb: 0,
+          size_mb: m.size_mb,
         }));
       allModels.push(...availableFunasr);
     } catch (err) {
@@ -114,7 +116,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
           provider: 'sherpa-onnx' as const,
           name: m.name,
           displayName: `🏷️ Sherpa-ONNX: ${m.name}`,
-          size_mb: 0,
+          size_mb: m.size_mb,
         }));
       allModels.push(...availableSherpaOnnx);
     } catch (err) {

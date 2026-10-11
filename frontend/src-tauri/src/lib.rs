@@ -144,6 +144,28 @@ struct FunasrModelEntry {
     name: String,
     path: String,
     valid: bool,
+    size_mb: f64,
+}
+
+/// Recursively computes the total size of a directory in megabytes.
+/// Used for directory-based transcription models (FunASR, sherpa-onnx).
+pub(crate) fn directory_size_mb(path: &std::path::Path) -> f64 {
+    fn dir_size(path: &std::path::Path) -> u64 {
+        let mut total = 0u64;
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                match entry.file_type() {
+                    Ok(ft) if ft.is_dir() => total += dir_size(&entry.path()),
+                    Ok(ft) if ft.is_file() => {
+                        total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        total
+    }
+    dir_size(path) as f64 / (1024.0 * 1024.0)
 }
 
 #[tauri::command]
@@ -456,6 +478,7 @@ async fn api_scan_funasr_models<R: Runtime>(
                 name,
                 path: path.display().to_string(),
                 valid,
+                size_mb: directory_size_mb(&path),
             });
         }
     }

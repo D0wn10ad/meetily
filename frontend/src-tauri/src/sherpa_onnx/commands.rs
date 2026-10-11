@@ -15,6 +15,7 @@ pub struct SherpaOnnxModelEntry {
     pub name: String,
     pub path: String,
     pub valid: bool,
+    pub size_mb: f64,
 }
 
 /// Scan the sherpa-onnx models directory and return discovered models.
@@ -45,6 +46,7 @@ pub async fn sherpa_onnx_scan_models<R: Runtime>(
                 name: m.model_type,
                 path: m.path.to_string_lossy().to_string(),
                 valid,
+                size_mb: crate::directory_size_mb(&m.path),
             }
         })
         .collect();
@@ -96,10 +98,11 @@ mod tests {
             name: "sensevoice".to_string(),
             path: "/tmp/models/sherpa-onnx/sensevoice".to_string(),
             valid: true,
+            size_mb: 123.4,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("sensevoice"));
-        assert!(json.contains("valid"));
+        assert!(json.contains("valid") && json.contains("size_mb"));
     }
 
     #[test]
