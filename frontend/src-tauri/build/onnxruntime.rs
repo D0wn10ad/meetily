@@ -26,13 +26,13 @@ const ARTIFACTS: [Artifact; 3] = [
     Artifact {
         archive_path: "onnxruntime-win-x64-1.24.4/lib/onnxruntime.dll",
         output_name: "onnxruntime.dll",
-        size: 12_418_080,
+        size: 14_203_464,
         sha256: "579b636403983254346a5c1d80bd28f1519cd1e284cd204f8d4ff41f8d711559",
     },
     Artifact {
         archive_path: "onnxruntime-win-x64-1.24.4/lib/onnxruntime_providers_shared.dll",
         output_name: "onnxruntime_providers_shared.dll",
-        size: 22_064,
+        size: 22_088,
         sha256: "ba00ea1ef846c9b909c7854bc56c51051a20f9773b3e1153dda118d4b85d0b93",
     },
     Artifact {
