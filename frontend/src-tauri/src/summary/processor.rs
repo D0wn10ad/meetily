@@ -217,13 +217,13 @@ fn translation_system_prompt(target_language: &str) -> String {
 
 fn build_chunk_summary_user_prompt(chunk: &str) -> String {
     format!(
-        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\nProvide a concise but comprehensive summary of the following transcript chunk. Capture all key points, decisions, action items, and mentioned individuals. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<transcript_chunk>\n{chunk}\n</transcript_chunk>"
+        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\nProvide a concise but comprehensive summary of the following transcript chunk. Capture all key points, decisions, action items, and mentioned individuals. Use Markdown formatting where appropriate (bold labels, bullet lists) for readability. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<transcript_chunk>\n{chunk}\n</transcript_chunk>"
     )
 }
 
 fn build_combine_summary_user_prompt(combined_text: &str) -> String {
     format!(
-        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\nThe following are consecutive summaries of a meeting. Combine them into a single, coherent, and detailed narrative summary that retains all important details, organized logically. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<summaries>\n{combined_text}\n</summaries>"
+        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\nThe following are consecutive summaries of a meeting. Combine them into a single, coherent, and detailed narrative summary that retains all important details, organized logically. Use Markdown formatting where appropriate (bold labels, bullet lists) for readability. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<summaries>\n{combined_text}\n</summaries>"
     )
 }
 fn build_final_report_system_prompt(
@@ -242,6 +242,7 @@ fn build_final_report_system_prompt(
 6. Output **only** the completed Markdown report.
 7. Do not include reasoning, thinking, self-correction, decision strategy, or any meta-commentary sections — output only the completed Markdown report.
 8. If unsure about something, omit it.
+9. The output must be valid Markdown that preserves the template structure exactly, using real `#`/`##` ATX headings as given in the template.
 
 **SECTION-SPECIFIC INSTRUCTIONS:**
 {section_instructions}
@@ -707,6 +708,37 @@ mod tests {
             prompt.contains("Do not include reasoning")
                 || prompt.contains("meta-commentary")
                 || prompt.contains("self-correction")
+        );
+    }
+
+    #[test]
+    fn chunk_summary_prompt_requests_markdown_formatting() {
+        let prompt = build_chunk_summary_user_prompt("transcript text");
+        assert!(
+            prompt.contains("Markdown formatting where appropriate"),
+            "chunk prompt should softly request Markdown formatting: {prompt}"
+        );
+    }
+
+    #[test]
+    fn combine_summary_prompt_requests_markdown_formatting() {
+        let prompt = build_combine_summary_user_prompt("chunk one\n---\nchunk two");
+        assert!(
+            prompt.contains("Markdown formatting where appropriate"),
+            "combine prompt should softly request Markdown formatting: {prompt}"
+        );
+    }
+
+    #[test]
+    fn final_report_prompt_requires_valid_markdown_structure() {
+        let prompt = build_final_report_system_prompt("Fill the section", "# <Add Title here>");
+        assert!(
+            prompt.contains("valid Markdown that preserves the template structure exactly"),
+            "final report prompt should require valid Markdown with template structure preserved: {prompt}"
+        );
+        assert!(
+            prompt.contains("`#`/`##` ATX headings"),
+            "final report prompt should require real ATX headings"
         );
     }
 
