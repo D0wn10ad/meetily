@@ -76,6 +76,44 @@ fn should_retry_chunk_failure(
         && !cancellation_token.is_some_and(CancellationToken::is_cancelled)
 }
 
+fn has_visible_markdown_structure(markdown: &str, template: &Template) -> bool {
+    let section_titles: Vec<String> = template
+        .sections
+        .iter()
+        .map(|section| section.title.trim().to_lowercase())
+        .filter(|title| !title.is_empty())
+        .collect();
+    if section_titles.is_empty() {
+        return false;
+    }
+    let mut in_code_fence = false;
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_code_fence = !in_code_fence;
+            continue;
+        }
+        if in_code_fence {
+            continue;
+        }
+        if let Some(heading) = trimmed.strip_prefix("## ") {
+            let heading = heading.trim().to_lowercase();
+            if section_titles.iter().any(|title| *title == heading) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn should_attempt_reformat(markdown: &str, template: &Template) -> bool {
+    template
+        .sections
+        .iter()
+        .any(|section| !section.title.trim().is_empty())
+        && !has_visible_markdown_structure(markdown, template)
+}
+
 const ENGLISH_BASE_SUMMARY_INSTRUCTION: &str =
     "**Write the summary/report in English regardless of transcript language; non-English prose is invalid.**";
 
@@ -125,9 +163,24 @@ fn english_markdown_after_normalization_result(
     original_markdown: &str,
     normalization_result: Result<CleanedLlmMarkdown, String>,
     cancellation_token: Option<&CancellationToken>,
+    template: &Template,
 ) -> Result<(CleanedLlmMarkdown, bool), String> {
     match normalization_result {
-        Ok(cleaned) if !cleaned.markdown.is_empty() => Ok((cleaned, false)),
+        Ok(cleaned) if !cleaned.markdown.is_empty() => {
+            if has_visible_markdown_structure(original_markdown, template)
+                && !has_visible_markdown_structure(&cleaned.markdown, template)
+            {
+                warn!("English normalization flattened the Markdown structure; returning pass-1 markdown");
+                return Ok((
+                    CleanedLlmMarkdown {
+                        markdown: original_markdown.to_string(),
+                        reasoning_stripped: cleaned.reasoning_stripped,
+                    },
+                    true,
+                ));
+            }
+            Ok((cleaned, false))
+        }
         Ok(cleaned) => {
             warn!("English normalization returned no visible content; returning pass-1 markdown");
             Ok((
@@ -153,6 +206,53 @@ fn english_markdown_after_normalization_result(
             ))
         }
     }
+}
+
+fn reformat_after_result(
+    original_markdown: &str,
+    reformat_result: Result<CleanedLlmMarkdown, String>,
+    template: &Template,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<(CleanedLlmMarkdown, bool), String> {
+    match reformat_result {
+        Ok(cleaned)
+            if !cleaned.markdown.is_empty()
+                && has_visible_markdown_structure(&cleaned.markdown, template)
+                && retained_at_least_sixty_percent(original_markdown, &cleaned.markdown) =>
+        {
+            Ok((cleaned, true))
+        }
+        Ok(cleaned) => {
+            warn!("Final report reformat output rejected; keeping original report");
+            Ok((
+                CleanedLlmMarkdown {
+                    markdown: original_markdown.to_string(),
+                    reasoning_stripped: cleaned.reasoning_stripped,
+                },
+                false,
+            ))
+        }
+        Err(error) if cancellation_token.is_some_and(CancellationToken::is_cancelled) => Err(error),
+        Err(e) => {
+            warn!("Final report reformat pass failed; keeping original report: {}", e);
+            Ok((
+                CleanedLlmMarkdown {
+                    markdown: original_markdown.to_string(),
+                    reasoning_stripped: false,
+                },
+                false,
+            ))
+        }
+    }
+}
+
+fn retained_at_least_sixty_percent(original: &str, candidate: &str) -> bool {
+    let original_chars = original.chars().filter(|c| !c.is_whitespace()).count();
+    if original_chars == 0 {
+        return false;
+    }
+    let candidate_chars = candidate.chars().filter(|c| !c.is_whitespace()).count();
+    candidate_chars * 5 >= original_chars * 3
 }
 
 /// Maps a BCP-47 tag to the English language name used inside LLM prompts.
@@ -243,6 +343,27 @@ fn build_final_report_system_prompt(
 7. Do not include reasoning, thinking, self-correction, decision strategy, or any meta-commentary sections — output only the completed Markdown report.
 8. If unsure about something, omit it.
 9. The output must be valid Markdown that preserves the template structure exactly, using real `#`/`##` ATX headings as given in the template.
+
+**SECTION-SPECIFIC INSTRUCTIONS:**
+{section_instructions}
+
+<template>
+{clean_template_markdown}
+</template>"#
+    )
+}
+
+fn build_reformat_system_prompt(
+    section_instructions: &str,
+    clean_template_markdown: &str,
+) -> String {
+    format!(
+        r#"You are an expert meeting report formatter. Restructure the provided meeting report into the Markdown template below.
+
+**CRITICAL INSTRUCTIONS:**
+1. Preserve every fact and the existing language exactly; only restructure the formatting into the template Markdown.
+2. Keep the `#`/`##` ATX heading structure exactly as given in the template.
+3. Do not add commentary or explanation. Output ONLY the reformatted Markdown report.
 
 **SECTION-SPECIFIC INSTRUCTIONS:**
 {section_instructions}
@@ -389,7 +510,7 @@ pub(crate) async fn generate_meeting_summary(
     info!("Starting summary generation with provider: {:?}, model: {}", provider, model_name);
 
     let total_tokens = rough_token_count(text);
-    let (mut english_markdown, successful_chunk_count, mut reasoning_stripped) =
+    let (english_markdown, successful_chunk_count, mut reasoning_stripped) =
         if let Some(cached) = resolve_cached_english(cached_english, summary_language) {
             info!("✓ Using cached English summary ({} chars), skipping pass 1", cached.len());
             (cached.to_string(), 1_i64, false)
@@ -515,6 +636,35 @@ pub(crate) async fn generate_meeting_summary(
             (cleaned.markdown, successful_chunk_count, stage_reasoning_stripped)
         };
 
+    let mut english_markdown = if should_attempt_reformat(&english_markdown, template) {
+        if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+            return Err("Summary generation was cancelled".to_string());
+        }
+        info!("Final report has no visible Markdown structure; attempting a single reformat pass");
+        let reformat_system_prompt = build_reformat_system_prompt(
+            &template.to_section_instructions(),
+            &template.to_markdown_structure(),
+        );
+        let (reformatted, used) = reformat_after_result(
+            &english_markdown,
+            run_markdown_transform(
+                client, provider, model_name, api_key, &reformat_system_prompt, &english_markdown,
+                "Final report reformat pass", ollama_endpoint, custom_openai_endpoint, max_tokens,
+                temperature, top_p, app_data_dir, cancellation_token,
+            )
+            .await,
+            template,
+            cancellation_token,
+        )?;
+        reasoning_stripped |= reformatted.reasoning_stripped;
+        if used {
+            info!("Final report reformat pass produced structured Markdown");
+        }
+        reformatted.markdown
+    } else {
+        english_markdown
+    };
+
     let (final_markdown, normalization_fallback) =
         match resolve_final_language_action(summary_language, detected_transcript_language) {
             FinalLanguageAction::Translate(language) => {
@@ -538,6 +688,7 @@ pub(crate) async fn generate_meeting_summary(
                     )
                     .await,
                     cancellation_token,
+                    template,
                 )?;
                 reasoning_stripped |= normalized.reasoning_stripped;
                 english_markdown = normalized.markdown.clone();
@@ -645,6 +796,7 @@ async fn normalize_markdown_to_english(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::summary::templates::TemplateSection;
 
     #[test]
     fn chunk_text_preserves_content_after_early_sentence_boundary() {
@@ -782,6 +934,7 @@ mod tests {
 
     #[test]
     fn normalization_fallback_preserves_markdown_and_observed_reasoning() {
+        let template = template_with_titles(&["Summary"]);
         assert_eq!(
             english_markdown_after_normalization_result(
                 "# Original",
@@ -790,6 +943,7 @@ mod tests {
                     reasoning_stripped: true,
                 }),
                 None,
+                &template,
             )
             .unwrap(),
             (
@@ -806,6 +960,7 @@ mod tests {
             "# Original",
             Err("Summary generation was cancelled".to_string()),
             Some(&cancellation_token),
+            &template,
         )
         .is_err());
     }
@@ -948,5 +1103,269 @@ mod tests {
         assert_eq!(cleaned.markdown, markdown);
         assert!(!cleaned.reasoning_stripped);
         assert_eq!(clean_llm_markdown_detailed(markdown).markdown, markdown);
+    }
+
+    fn template_with_titles(titles: &[&str]) -> Template {
+        Template {
+            name: "Test Template".to_string(),
+            description: "Test description".to_string(),
+            sections: titles
+                .iter()
+                .map(|title| TemplateSection {
+                    title: (*title).to_string(),
+                    instruction: format!("Fill the {title} section"),
+                    format: "paragraph".to_string(),
+                    item_format: None,
+                    example_item_format: None,
+                })
+                .collect(),
+        }
+    }
+
+    const MEETING_TITLES: &[&str] = &["Summary", "Action Items"];
+
+    #[test]
+    fn validator_rejects_title_with_flat_prose_body() {
+        let template = template_with_titles(MEETING_TITLES);
+        assert!(!has_visible_markdown_structure(
+            "# Weekly Sync\n\nWe discussed the roadmap and assigned follow-ups.",
+            &template,
+        ));
+    }
+
+    #[test]
+    fn validator_accepts_matching_level_two_heading() {
+        let template = template_with_titles(MEETING_TITLES);
+        assert!(has_visible_markdown_structure(
+            "# Weekly Sync\n\n## Summary\n\n- item\n\n## Action Items\n\n- task",
+            &template,
+        ));
+    }
+
+    #[test]
+    fn validator_ignores_headings_inside_code_fences() {
+        let template = template_with_titles(MEETING_TITLES);
+        assert!(!has_visible_markdown_structure(
+            "# Weekly Sync\n\n```\n## Summary\n```",
+            &template,
+        ));
+    }
+
+    #[test]
+    fn validator_requires_space_after_hash_marks() {
+        let template = template_with_titles(MEETING_TITLES);
+        assert!(!has_visible_markdown_structure(
+            "# Weekly Sync\n\n##Summary\n\n- item",
+            &template,
+        ));
+    }
+
+    #[test]
+    fn validator_rejects_headings_matching_no_section_title() {
+        let template = template_with_titles(MEETING_TITLES);
+        assert!(!has_visible_markdown_structure(
+            "# Weekly Sync\n\n## Notes\n\n- item",
+            &template,
+        ));
+    }
+
+    #[test]
+    fn validator_matches_case_insensitively_after_trimming() {
+        let template = template_with_titles(MEETING_TITLES);
+        assert!(has_visible_markdown_structure(
+            "# Weekly Sync\n\n  ## summary  \n\n- item",
+            &template,
+        ));
+    }
+
+    #[test]
+    fn reformat_is_attempted_only_for_flat_output_with_section_titles() {
+        let template = template_with_titles(MEETING_TITLES);
+        assert!(should_attempt_reformat(
+            "# Weekly Sync\n\nFlat prose without any section headings.",
+            &template,
+        ));
+        assert!(!should_attempt_reformat(
+            "# Weekly Sync\n\n## Summary\n\n- item",
+            &template,
+        ));
+    }
+
+    #[test]
+    fn reformat_is_skipped_when_template_has_no_section_titles() {
+        let template = template_with_titles(&["   "]);
+        assert!(!should_attempt_reformat(
+            "# Weekly Sync\n\nFlat prose without any section headings.",
+            &template,
+        ));
+    }
+
+    #[test]
+    fn reformat_accepts_structured_retry_with_enough_retention() {
+        let template = template_with_titles(MEETING_TITLES);
+        // 50 non-whitespace chars in the original; the retry keeps 15 scaffold
+        // chars (# Title / ## Summary) + a 15-char body = 30 = exactly 60%.
+        let original = "aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee";
+        let retried_markdown = "# Title\n\n## Summary\n\naaaaaaaaaaaaaaa";
+        let retried = CleanedLlmMarkdown {
+            markdown: retried_markdown.to_string(),
+            reasoning_stripped: true,
+        };
+        assert_eq!(
+            reformat_after_result(original, Ok(retried), &template, None).unwrap(),
+            (
+                CleanedLlmMarkdown {
+                    markdown: retried_markdown.to_string(),
+                    reasoning_stripped: true,
+                },
+                true,
+            )
+        );
+    }
+
+    #[test]
+    fn reformat_rejects_structured_retry_losing_more_than_forty_percent() {
+        let template = template_with_titles(MEETING_TITLES);
+        // 15 scaffold chars + 14-char body = 29 non-ws chars = 58% < 60%.
+        let original = "aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee";
+        let retried = CleanedLlmMarkdown {
+            markdown: "# Title\n\n## Summary\n\naaaaaaaaaaaaaa".to_string(),
+            reasoning_stripped: false,
+        };
+        let (kept, used) = reformat_after_result(original, Ok(retried), &template, None).unwrap();
+        assert!(!used);
+        assert_eq!(kept.markdown, original);
+        assert!(!kept.reasoning_stripped);
+    }
+
+    #[test]
+    fn reformat_rejects_flat_retry_output() {
+        let template = template_with_titles(MEETING_TITLES);
+        let original = "aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee";
+        let retried = CleanedLlmMarkdown {
+            markdown: "Flat prose without headings, all facts preserved.".to_string(),
+            reasoning_stripped: false,
+        };
+        let (kept, used) = reformat_after_result(original, Ok(retried), &template, None).unwrap();
+        assert!(!used);
+        assert_eq!(kept.markdown, original);
+    }
+
+    #[test]
+    fn reformat_keeps_original_when_retry_returns_empty() {
+        let template = template_with_titles(MEETING_TITLES);
+        let original = "aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee";
+        let retried = CleanedLlmMarkdown {
+            markdown: String::new(),
+            reasoning_stripped: true,
+        };
+        let (kept, used) = reformat_after_result(original, Ok(retried), &template, None).unwrap();
+        assert!(!used);
+        assert_eq!(kept.markdown, original);
+        assert!(kept.reasoning_stripped);
+    }
+
+    #[test]
+    fn reformat_keeps_original_when_retry_fails_without_cancellation() {
+        let template = template_with_titles(MEETING_TITLES);
+        let original = "aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee";
+        let (kept, used) =
+            reformat_after_result(original, Err("reformat failed".to_string()), &template, None)
+                .unwrap();
+        assert!(!used);
+        assert_eq!(kept.markdown, original);
+    }
+
+    #[test]
+    fn reformat_propagates_cancellation_errors() {
+        let template = template_with_titles(MEETING_TITLES);
+        let cancellation_token = CancellationToken::new();
+        cancellation_token.cancel();
+        assert!(reformat_after_result(
+            "original",
+            Err("Summary generation was cancelled".to_string()),
+            &template,
+            Some(&cancellation_token),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn normalization_keeps_pass_one_markdown_when_result_loses_structure() {
+        let template = template_with_titles(MEETING_TITLES);
+        let original = "# Weekly Sync\n\n## Summary\n\n- item";
+        let (kept, fallback) = english_markdown_after_normalization_result(
+            original,
+            Ok(CleanedLlmMarkdown {
+                markdown: "Weekly Sync. We discussed the roadmap and assigned follow-ups."
+                    .to_string(),
+                reasoning_stripped: true,
+            }),
+            None,
+            &template,
+        )
+        .unwrap();
+        assert!(fallback);
+        assert_eq!(kept.markdown, original);
+        assert!(kept.reasoning_stripped);
+    }
+
+    #[test]
+    fn normalization_keeps_normalized_markdown_when_structure_survives() {
+        let template = template_with_titles(MEETING_TITLES);
+        let original = "# Weekly Sync\n\n## Summary\n\n- item";
+        let (kept, fallback) = english_markdown_after_normalization_result(
+            original,
+            Ok(CleanedLlmMarkdown {
+                markdown: "# Weekly Sync\n\n## Summary\n\n- item".to_string(),
+                reasoning_stripped: false,
+            }),
+            None,
+            &template,
+        )
+        .unwrap();
+        assert!(!fallback);
+        assert_eq!(kept.markdown, "# Weekly Sync\n\n## Summary\n\n- item");
+    }
+
+    #[test]
+    fn normalization_keeps_normalized_markdown_when_pass_one_was_flat() {
+        let template = template_with_titles(MEETING_TITLES);
+        let original = "Weekly Sync. We discussed the roadmap.";
+        let (kept, fallback) = english_markdown_after_normalization_result(
+            original,
+            Ok(CleanedLlmMarkdown {
+                markdown: "Weekly Sync follow-ups were assigned.".to_string(),
+                reasoning_stripped: false,
+            }),
+            None,
+            &template,
+        )
+        .unwrap();
+        assert!(!fallback);
+        assert_eq!(kept.markdown, "Weekly Sync follow-ups were assigned.");
+    }
+
+    #[test]
+    fn reformat_prompt_carries_template_sections_and_preserve_facts_rule() {
+        let template = template_with_titles(MEETING_TITLES);
+        let prompt = build_reformat_system_prompt(
+            &template.to_section_instructions(),
+            &template.to_markdown_structure(),
+        );
+        assert!(
+            prompt.contains("## Summary"),
+            "reformat prompt should embed the template scaffold: {prompt}"
+        );
+        assert!(
+            prompt.contains("For the 'Summary' section"),
+            "reformat prompt should embed the section instructions: {prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "Preserve every fact and the existing language exactly; only restructure the formatting into the template Markdown."
+            ),
+            "reformat prompt must demand fact and language preservation: {prompt}"
+        );
     }
 }
