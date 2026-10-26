@@ -10,6 +10,10 @@ use std::{
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 
+mod build_env {
+    include!("../src/build_env.rs");
+}
+
 const WINDOWS_X64_TARGET: &str = "x86_64-pc-windows-msvc";
 const ARCHIVE_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-win-x64-1.24.4.zip";
 const ARCHIVE_SHA256: &str = "d2319fddfb6ea4db99ccc4b60c85c517bcd855721f5daa6a06d40d7cb2ee2357";
@@ -191,6 +195,20 @@ fn stage_runtime(archive_path: &Path, destination: &Path) -> Result<(), String> 
 }
 
 fn download_archive(destination: &Path) -> Result<(), String> {
+    let attempts = build_env::DOWNLOAD_ATTEMPTS;
+    build_env::retry_with_backoff(
+        |attempt| {
+            println!(
+                "cargo:warning=Downloading ONNX Runtime from {ARCHIVE_URL} (attempt {attempt}/{attempts})"
+            );
+            download_archive_once(destination)
+        },
+        |seconds| std::thread::sleep(std::time::Duration::from_secs(seconds)),
+    )
+    .map_err(|error| format!("failed to download ONNX Runtime after {attempts} attempts: {error}"))
+}
+
+fn download_archive_once(destination: &Path) -> Result<(), String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
         .build()
