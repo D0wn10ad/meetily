@@ -4,6 +4,74 @@
 
 set -e
 
+# ---------------------------------------------------------------------------
+# GPU feature helpers
+# ---------------------------------------------------------------------------
+
+# GPU accelerator tokens understood by this script. Keep in sync with the
+# match arms below and the `ort-*` features in frontend/src-tauri/Cargo.toml.
+# `openblas` and `none` are CPU-only markers: OpenBLAS is CPU linear algebra,
+# not a GPU accelerator.
+KNOWN_GPU_FEATURES="coreml metal cuda vulkan hipblas openblas none"
+
+is_known_gpu_feature() {
+  local candidate="$1" known
+  for known in $KNOWN_GPU_FEATURES; do
+    if [ "$candidate" = "$known" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+print_valid_gpu_features() {
+  echo -e "   Valid values: ${KNOWN_GPU_FEATURES// /, }"
+  echo -e "   (leave TAURI_GPU_FEATURE unset for a CPU-only build)"
+}
+
+# parse_ort_features <value>
+#
+# Contract: normalise a cargo `--features` value into a comma-separated list.
+# Accepts an optional, whitespace-tolerant `--features` / `--features=` prefix,
+# then splits on commas and whitespace and trims every element. An empty or
+# missing value yields an empty string (never the literal "--features ").
+#
+# Real call sites:
+#   * this script's own ORT_FEATURES values ("--features ort-coreml", ...)
+#   * the `ort-*` features declared in frontend/src-tauri/Cargo.toml
+# The GPU token emitted by frontend/scripts/auto-detect-gpu.js is a SINGLE
+# token, and frontend/scripts/tauri-auto.js never splits on commas, so the
+# comma-joined form produced here is local to this script and to
+# tauri-auto.js's pass-through `--features` argument.
+parse_ort_features() {
+  local raw="$*" item out=""
+  # Trim leading whitespace.
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  case "$raw" in
+    --features=*) raw="${raw#--features=}" ;;
+    --features*)  raw="${raw#--features}" ;;
+  esac
+  local normalized="${raw//,/ }"
+  for item in $normalized; do
+    [ -n "$item" ] || continue
+    if [ -z "$out" ]; then
+      out="$item"
+    else
+      out="$out,$item"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# Test hook: lets frontend/tests/scripts/build-gpu-path-resolution.test.sh
+# source only the helpers above without running the build.
+if [ "${BUILD_GPU_LIB_ONLY:-0}" = "1" ]; then
+  if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+    return 0
+  fi
+  exit 0
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,6 +81,28 @@ NC='\033[0m' # No Color
 
 echo -e "${BLUE}🚀 Meetily GPU-Accelerated Build Script${NC}"
 echo ""
+
+# ---------------------------------------------------------------------------
+# Absolute, cwd-independent path resolution.
+# The script lives in frontend/, so derive every path from BASH_SOURCE and
+# canonicalise it. No later `cd` can change what target/... means.
+# ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+FRONTEND_DIR="$SCRIPT_DIR"
+WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+if [ ! -f "$FRONTEND_DIR/package.json" ]; then
+  echo -e "${RED}❌ Could not find package.json in $FRONTEND_DIR${NC}"
+  exit 1
+fi
+
+echo -e "${BLUE}📁 Frontend: $FRONTEND_DIR${NC}"
+echo -e "${BLUE}📁 Workspace: $WORKSPACE_ROOT${NC}"
+
+cd "$FRONTEND_DIR" || {
+  echo -e "${RED}❌ Failed to change to frontend directory: $FRONTEND_DIR${NC}"
+  exit 1
+}
 
 # Export CUDA flags for Linux/NVIDIA
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
@@ -36,21 +126,6 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
-# Find the correct directory - we need to be in frontend root for npm commands
-if [ -f "package.json" ]; then
-  FRONTEND_DIR="."
-elif [ -f "frontend/package.json" ]; then
-  cd frontend || {
-    echo -e "${RED}❌ Failed to change to frontend directory${NC}"
-    exit 1
-  }
-  FRONTEND_DIR="frontend"
-else
-  echo -e "${RED}❌ Could not find package.json${NC}"
-  echo -e "${RED}   Make sure you're in the project root or frontend directory${NC}"
-  exit 1
-fi
-
 echo ""
 echo -e "${BLUE}📦 Building Meetily...${NC}"
 echo ""
@@ -66,22 +141,20 @@ else
 fi
 
 # Detect GPU feature if not already set
-if [ -z "$TAURI_GPU_FEATURE" ]; then
+if [ -z "${TAURI_GPU_FEATURE:-}" ]; then
     echo -e "${BLUE}🔍 Detecting GPU features...${NC}"
-    # Run the detection script and capture output
-    # We need to run it from frontend dir
-    if [ "$FRONTEND_DIR" != "." ]; then
-        cd "$FRONTEND_DIR"
-    fi
-    
-    TAURI_GPU_FEATURE=$(node scripts/auto-detect-gpu.js)
-    
-    if [ "$FRONTEND_DIR" != "." ]; then
-        cd ..
+    if ! TAURI_GPU_FEATURE=$(node scripts/auto-detect-gpu.js); then
+        echo -e "${RED}❌ GPU auto-detection failed: node scripts/auto-detect-gpu.js exited non-zero${NC}"
+        exit 1
     fi
 fi
 
 if [ -n "$TAURI_GPU_FEATURE" ]; then
+    if ! is_known_gpu_feature "$TAURI_GPU_FEATURE"; then
+        echo -e "${RED}❌ Unknown GPU feature: '$TAURI_GPU_FEATURE'${NC}"
+        print_valid_gpu_features
+        exit 1
+    fi
     echo -e "${GREEN}✅ Detected GPU feature: $TAURI_GPU_FEATURE${NC}"
     export TAURI_GPU_FEATURE
 else
@@ -114,27 +187,30 @@ if [ -n "$TAURI_GPU_FEATURE" ]; then
                 echo -e "${GREEN}🔧 ONNX: Using OpenVINO (Intel GPU + NPU)${NC}"
             fi
             ;;
-        openblas|*)
+        openblas)
             ORT_FEATURES="--features ort-cpu"
-            echo -e "${GREEN}🔧 ONNX: Using CPU fallback${NC}"
+            echo -e "${GREEN}🔧 ONNX: Using OpenBLAS CPU linear algebra (not a GPU)${NC}"
+            ;;
+        none)
+            ORT_FEATURES="--features ort-cpu"
+            echo -e "${GREEN}🔧 ONNX: CPU-only (TAURI_GPU_FEATURE=none)${NC}"
+            ;;
+        *)
+            echo -e "${RED}❌ Unknown GPU feature: '$TAURI_GPU_FEATURE'${NC}"
+            print_valid_gpu_features
+            exit 1
             ;;
     esac
 else
     ORT_FEATURES="--features ort-cpu"
-    echo -e "${GREEN}🔧 ONNX: No GPU detected, using CPU fallback${NC}"
+    echo -e "${GREEN}🔧 ONNX: No GPU detected, using CPU execution provider${NC}"
 fi
 
 # Build llama-helper
 echo ""
 echo -e "${BLUE}🦙 Building llama-helper sidecar (release)...${NC}"
 
-HELPER_DIR="llama-helper"
-if [ ! -d "$HELPER_DIR" ]; then
-    # Try to find it relative to script location
-    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-    HELPER_DIR="$SCRIPT_DIR/../llama-helper"
-fi
-
+HELPER_DIR="$WORKSPACE_ROOT/llama-helper"
 if [ ! -d "$HELPER_DIR" ]; then
     echo -e "${RED}❌ Could not find llama-helper directory${NC}"
     exit 1
@@ -154,9 +230,9 @@ if [ -n "$TAURI_GPU_FEATURE" ]; then
 fi
 
 echo -e "   Building in $HELPER_DIR with features: ${HELPER_FEATURES:-none}"
-(cd "$HELPER_DIR" && cargo build --release $HELPER_FEATURES)
-
-if [ $? -ne 0 ]; then
+# Keep $HELPER_FEATURES unquoted: it deliberately word-splits into
+# ("--features", "<value>"). Quoting would pass one argv entry and break cargo.
+if ! (cd "$HELPER_DIR" && cargo build --release $HELPER_FEATURES); then
     echo -e "${RED}❌ Failed to build llama-helper${NC}"
     exit 1
 fi
@@ -184,16 +260,11 @@ if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
     SIDECAR_BINARY="llama-helper-$TARGET_TRIPLE.exe"
 fi
 
-# The binary is in the workspace target directory, which is one level up from frontend
-# if we are in frontend dir.
-WORKSPACE_ROOT="$FRONTEND_DIR/.."
+# The binary is in the workspace target directory, one level above frontend.
+# WORKSPACE_ROOT is absolute, so neither the caller's cwd nor an earlier `cd`
+# can change what this path means.
 SRC_PATH="$WORKSPACE_ROOT/target/release/$BASE_BINARY"
 DEST_PATH="$BINARIES_DIR/$SIDECAR_BINARY"
-
-if [ ! -f "$SRC_PATH" ]; then
-    # Fallback: check if we are running from root and target is in root
-    SRC_PATH="target/release/$BASE_BINARY"
-fi
 
 if [ -f "$SRC_PATH" ]; then
     cp "$SRC_PATH" "$DEST_PATH"
@@ -202,7 +273,7 @@ else
     echo -e "${RED}❌ Binary not found at $SRC_PATH${NC}"
     # List contents of target/release to help debugging
     echo -e "${YELLOW}Contents of target/release:${NC}"
-    ls -la "$WORKSPACE_ROOT/target/release/" || ls -la "target/release/"
+    ls -la "$WORKSPACE_ROOT/target/release/" || true
     exit 1
 fi
 
@@ -216,11 +287,13 @@ echo ""
 # This combines whisper features (e.g., "coreml") with ort features (e.g., "ort-coreml")
 # into a single comma-separated string passed to `--features` by tauri-auto.js
 if [ -n "$ORT_FEATURES" ]; then
-    ORT_FLAG="${ORT_FEATURES#--features }"
-    if [ -n "$TAURI_GPU_FEATURE" ]; then
-        export TAURI_GPU_FEATURE="${TAURI_GPU_FEATURE},${ORT_FLAG}"
-    else
-        export TAURI_GPU_FEATURE="${ORT_FLAG}"
+    ORT_FLAG="$(parse_ort_features "$ORT_FEATURES")"
+    if [ -n "$ORT_FLAG" ]; then
+        if [ -n "$TAURI_GPU_FEATURE" ]; then
+            export TAURI_GPU_FEATURE="${TAURI_GPU_FEATURE},${ORT_FLAG}"
+        else
+            export TAURI_GPU_FEATURE="${ORT_FLAG}"
+        fi
     fi
 fi
 
@@ -236,4 +309,3 @@ else
   echo -e "${RED}❌ Build failed${NC}"
   exit 1
 fi
-
