@@ -18,20 +18,17 @@ fn postprocess(text: &str) -> String {
     // 1. Strip BPE continuation markers (WordPiece/SentencePiece convention)
     //    e.g. "sc@@al@@e" → "scale"
     let text = text.replace("@@", "");
-    
+
     // 2. Remove special token substrings
     let text = text
         .replace("<s>", "")
         .replace("</s>", "")
         .replace("<unk>", "")
         .replace("<blank>", "");
-    
+
     // 3. Normalize whitespace and trim
-    let text = text
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+
     text.trim().to_string()
 }
 
@@ -51,11 +48,14 @@ pub fn decode(
     }
 
     if logits.len() % VOCAB_SIZE != 0 {
-        return Err(FunasrError::DecodeError(format!(
-            "logits length {} is not divisible by vocab_size {}",
-            logits.len(),
-            VOCAB_SIZE
-        )));
+        return Err(FunasrError::DecodeError {
+            message: format!(
+                "logits length {} is not divisible by vocab_size {}",
+                logits.len(),
+                VOCAB_SIZE
+            ),
+            source: None,
+        });
     }
 
     let num_frames = logits.len() / VOCAB_SIZE;
@@ -84,26 +84,36 @@ pub fn decode(
     let selected = &filtered[..valid_len];
 
     // 5. Token lookup
-        let mut decoded = String::new();
-        for &token_id in selected {
-            if token_id < token_list.len() {
-                let token = &token_list[token_id];
-                // Strip BPE continuation marker @@ during concatenation
-                // so subword pieces merge properly: "sc@@" + "al@@" + "e" → "scale"
-                if let Some(stripped) = token.strip_suffix("@@") {
-                    decoded.push_str(stripped);
-                } else {
-                    decoded.push_str(token);
-                }
+    let mut decoded = String::new();
+    for &token_id in selected {
+        if token_id < token_list.len() {
+            let token = &token_list[token_id];
+            // Strip BPE continuation marker @@ during concatenation
+            // so subword pieces merge properly: "sc@@" + "al@@" + "e" → "scale"
+            if let Some(stripped) = token.strip_suffix("@@") {
+                decoded.push_str(stripped);
             } else {
-                log::warn!("FunASR decode: token {} out of range (vocab size {})", token_id, token_list.len());
+                decoded.push_str(token);
             }
+        } else {
+            log::warn!(
+                "FunASR decode: token {} out of range (vocab size {})",
+                token_id,
+                token_list.len()
+            );
         }
+    }
 
     // 6. Post-processing
     let result = postprocess(&decoded);
 
-    log::info!("FunASR decode: {} logit frames, {} raw tokens → {} filtered tokens → '{}'", num_frames, tokens.len(), filtered.len(), result);
+    log::info!(
+        "FunASR decode: {} logit frames, {} raw tokens → {} filtered tokens → '{}'",
+        num_frames,
+        tokens.len(),
+        filtered.len(),
+        result
+    );
 
     Ok(result)
 }
@@ -198,8 +208,8 @@ mod tests {
         let result = decode(&logits, 0, &tokens);
         assert!(result.is_err());
         match result {
-            Err(FunasrError::DecodeError(msg)) => {
-                assert!(msg.contains("not divisible"));
+            Err(FunasrError::DecodeError { message, .. }) => {
+                assert!(message.contains("not divisible"));
             }
             _ => panic!("Expected DecodeError"),
         }
@@ -212,27 +222,39 @@ mod tests {
         tokens[1] = "<s>".to_string();
         tokens[2] = "</s>".to_string();
         tokens[3] = "hel@@".to_string();
-        tokens[4] = "lo".to_string();  
+        tokens[4] = "lo".to_string();
         tokens[5] = "world".to_string();
         tokens[8] = "sc@@".to_string();
         tokens[9] = "al@@".to_string();
         tokens[10] = "e".to_string();
-        
+
         let mut logits = vec![0.0f32; 6 * 8404];
-        logits[0 * 8404 + 1] = 10.0;  // sos
-        logits[1 * 8404 + 3] = 10.0;  // hel@@
-        logits[2 * 8404 + 4] = 10.0;  // lo
-        logits[3 * 8404 + 5] = 10.0;  // world
-        logits[4 * 8404 + 8] = 10.0;  // sc@@
-        logits[5 * 8404 + 9] = 10.0;  // al@@ (only 2 pieces, missing 'e' to keep test short)
-        
+        logits[0 * 8404 + 1] = 10.0; // sos
+        logits[1 * 8404 + 3] = 10.0; // hel@@
+        logits[2 * 8404 + 4] = 10.0; // lo
+        logits[3 * 8404 + 5] = 10.0; // world
+        logits[4 * 8404 + 8] = 10.0; // sc@@
+        logits[5 * 8404 + 9] = 10.0; // al@@ (only 2 pieces, missing 'e' to keep test short)
+
         let result = decode(&logits, 5, &tokens).unwrap();
         // "hel@@lo" -> "hello", "world" -> "world", "sc@@" -> "sc", "al@@" -> "al"
         // After postprocess: "hello worldscal" or similar
-        assert!(result.contains("hello"), "Expected 'hello' in result, got: {}", result);
-        assert!(result.contains("world"), "Expected 'world' in result, got: {}", result);
+        assert!(
+            result.contains("hello"),
+            "Expected 'hello' in result, got: {}",
+            result
+        );
+        assert!(
+            result.contains("world"),
+            "Expected 'world' in result, got: {}",
+            result
+        );
         // @@ markers should NOT appear
-        assert!(!result.contains("@@"), "result should not contain @@: {}", result);
+        assert!(
+            !result.contains("@@"),
+            "result should not contain @@: {}",
+            result
+        );
     }
 
     #[test]

@@ -132,7 +132,10 @@ fn compute_fbank(audio: &[f32]) -> Result<Vec<Vec<f32>>, FunasrError> {
 
         // 3. Real FFT → 257 complex bins
         fft.process(&mut indata, &mut spectrum)
-            .map_err(|e| FunasrError::DecodeError(format!("FFT error: {e}")))?;
+            .map_err(|e| FunasrError::DecodeError {
+                message: format!("FFT error: {e}"),
+                source: Some(Box::new(e)),
+            })?;
 
         // 4. Power spectrum + mel filterbank + log
         let mut mel_energies = [0.0f32; N_MELS];
@@ -211,48 +214,69 @@ fn apply_lfr(fbank: &[Vec<f32>]) -> Vec<Vec<f32>> {
 ///
 /// Matches FunASR Python `load_cmvn()`: finds `<{section_name}>`, then parses
 /// the next line's `<LearnRateCoef>` bracket-format values.
-fn parse_text_cmvn_vector(data: &[u8], section_name: &str) -> Result<Vec<f32>, FunasrError> {
-    let text = std::str::from_utf8(data).map_err(|_| {
-        FunasrError::InvalidCmvnFile("CMVN file is not valid UTF-8".into())
+fn parse_text_cmvn_vector(
+    data: &[u8],
+    section_name: &str,
+    path: &Path,
+) -> Result<Vec<f32>, FunasrError> {
+    let text = std::str::from_utf8(data).map_err(|e| FunasrError::InvalidCmvnFile {
+        path: path.to_path_buf(),
+        message: "CMVN file is not valid UTF-8".to_string(),
+        source: Some(Box::new(e)),
     })?;
 
     let header = format!("<{section_name}>");
 
-    let header_line_idx = text.lines().position(|line| line.trim().starts_with(&header)).ok_or_else(|| {
-        FunasrError::InvalidCmvnFile(format!("Missing '<{section_name}>' section in CMVN file"))
-    })?;
+    let header_line_idx = text
+        .lines()
+        .position(|line| line.trim().starts_with(&header))
+        .ok_or_else(|| FunasrError::InvalidCmvnFile {
+            path: path.to_path_buf(),
+            message: format!("Missing '<{section_name}>' section in CMVN file"),
+            source: None,
+        })?;
 
-    let val_line = text.lines().nth(header_line_idx + 1).ok_or_else(|| {
-        FunasrError::InvalidCmvnFile(format!(
-            "Expected '<LearnRateCoef>' after '<{section_name}>'"
-        ))
-    })?;
+    let val_line =
+        text.lines()
+            .nth(header_line_idx + 1)
+            .ok_or_else(|| FunasrError::InvalidCmvnFile {
+                path: path.to_path_buf(),
+                message: format!("Expected '<LearnRateCoef>' after '<{section_name}>'"),
+                source: None,
+            })?;
 
     if !val_line.trim_start().starts_with("<LearnRateCoef>") {
-        return Err(FunasrError::InvalidCmvnFile(format!(
-            "Expected '<LearnRateCoef>' after '<{section_name}>', got: {}",
-            val_line.trim()
-        )));
+        return Err(FunasrError::InvalidCmvnFile {
+            path: path.to_path_buf(),
+            message: format!(
+                "Expected '<LearnRateCoef>' after '<{section_name}>', got: {}",
+                val_line.trim()
+            ),
+            source: None,
+        });
     }
 
     // tokens layout: [0]="<LearnRateCoef>", [1]="0", [2]="[", [3..last-1]=floats, [last]="]"
     let tokens: Vec<&str> = val_line.split_whitespace().collect();
 
     if tokens.len() < 4 || tokens[2] != "[" || tokens[tokens.len() - 1] != "]" {
-        return Err(FunasrError::InvalidCmvnFile(format!(
-            "Expected bracket-format vector after '<{section_name}>', got {} tokens",
-            tokens.len()
-        )));
+        return Err(FunasrError::InvalidCmvnFile {
+            path: path.to_path_buf(),
+            message: format!(
+                "Expected bracket-format vector after '<{section_name}>', got {} tokens",
+                tokens.len()
+            ),
+            source: None,
+        });
     }
 
     let values: Vec<f32> = tokens[3..tokens.len() - 1]
         .iter()
         .map(|&s| {
-            s.parse::<f32>().map_err(|e| {
-                FunasrError::InvalidCmvnFile(format!(
-                    "Failed to parse float '{}' in '<{section_name}>': {e}",
-                    s
-                ))
+            s.parse::<f32>().map_err(|e| FunasrError::InvalidCmvnFile {
+                path: path.to_path_buf(),
+                message: format!("Failed to parse float '{}' in '<{section_name}>': {e}", s),
+                source: Some(Box::new(e)),
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -264,21 +288,26 @@ fn parse_text_cmvn_vector(data: &[u8], section_name: &str) -> Result<Vec<f32>, F
 ///
 /// The file is expected to contain an `<AddShift>` section (negative means)
 /// followed by a `<Rescale>` section (inverse standard deviations).
-fn parse_kaldi_cmvn(data: &[u8]) -> Result<(Vec<f32>, Vec<f32>), FunasrError> {
-    let means = parse_text_cmvn_vector(data, "AddShift")?;
-    let inv_stds = parse_text_cmvn_vector(data, "Rescale")?;
+fn parse_kaldi_cmvn(data: &[u8], path: &Path) -> Result<(Vec<f32>, Vec<f32>), FunasrError> {
+    let means = parse_text_cmvn_vector(data, "AddShift", path)?;
+    let inv_stds = parse_text_cmvn_vector(data, "Rescale", path)?;
 
     if means.len() != FEAT_DIM {
-        return Err(FunasrError::InvalidCmvnFile(format!(
-            "Expected CMVN means length {FEAT_DIM}, got {}",
-            means.len()
-        )));
+        return Err(FunasrError::InvalidCmvnFile {
+            path: path.to_path_buf(),
+            message: format!("Expected CMVN means length {FEAT_DIM}, got {}", means.len()),
+            source: None,
+        });
     }
     if inv_stds.len() != FEAT_DIM {
-        return Err(FunasrError::InvalidCmvnFile(format!(
-            "Expected CMVN inv_stds length {FEAT_DIM}, got {}",
-            inv_stds.len()
-        )));
+        return Err(FunasrError::InvalidCmvnFile {
+            path: path.to_path_buf(),
+            message: format!(
+                "Expected CMVN inv_stds length {FEAT_DIM}, got {}",
+                inv_stds.len()
+            ),
+            source: None,
+        });
     }
 
     Ok((means, inv_stds))
@@ -319,8 +348,12 @@ impl FunasrFrontend {
     /// Load a Kaldi-binary CMVN file and construct a frontend.
     pub fn new(cmvn_path: &Path) -> Result<Self, FunasrError> {
         let bytes = std::fs::read(cmvn_path)?;
-        let (cmvn_means, cmvn_inv_std) = parse_kaldi_cmvn(&bytes)?;
-        log::info!("FunASR CMVN loaded: {} means, {} inv_stds", cmvn_means.len(), cmvn_inv_std.len());
+        let (cmvn_means, cmvn_inv_std) = parse_kaldi_cmvn(&bytes, cmvn_path)?;
+        log::info!(
+            "FunASR CMVN loaded: {} means, {} inv_stds",
+            cmvn_means.len(),
+            cmvn_inv_std.len()
+        );
         Ok(Self {
             cmvn_means,
             cmvn_inv_std,
@@ -338,8 +371,8 @@ impl FunasrFrontend {
         }
         if audio.len() < FRAME_LENGTH {
             return Err(FunasrError::AudioTooShort {
-                min: FRAME_LENGTH,
-                actual: audio.len(),
+                expected: FRAME_LENGTH,
+                got: audio.len(),
             });
         }
 
@@ -351,7 +384,12 @@ impl FunasrFrontend {
 
         // 3. Low Frame Rate stacking
         let lfr = apply_lfr(&fbank);
-        log::info!("FunASR frontend: {} samples → {} fbank frames → {} lfr frames", audio.len(), fbank.len(), lfr.len());
+        log::info!(
+            "FunASR frontend: {} samples → {} fbank frames → {} lfr frames",
+            audio.len(),
+            fbank.len(),
+            lfr.len()
+        );
 
         // 4. CMVN normalisation
         let cmvn = apply_cmvn(&lfr, &self.cmvn_means, &self.cmvn_inv_std);
@@ -371,6 +409,9 @@ impl FunasrFrontend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    const TEST_CMVN_PATH: &str = "/tmp/meetily-test-am.mvn";
 
     fn generate_sine_wave(samples: usize, freq: f32, sample_rate: u32) -> Vec<f32> {
         (0..samples)
@@ -396,8 +437,8 @@ mod tests {
     #[test]
     fn test_short_audio_error() {
         let err = FunasrError::AudioTooShort {
-            min: FRAME_LENGTH,
-            actual: 200,
+            expected: FRAME_LENGTH,
+            got: 200,
         };
         assert!(err.to_string().contains("200"));
     }
@@ -521,13 +562,17 @@ mod tests {
 
     /// Generate a valid 560-dim AddShift text line for use in tests.
     fn make_addshift_line() -> String {
-        let vals: Vec<String> = (0..560).map(|i| format!("{}", -0.5 - i as f32 * 0.001)).collect();
+        let vals: Vec<String> = (0..560)
+            .map(|i| format!("{}", -0.5 - i as f32 * 0.001))
+            .collect();
         format!("<LearnRateCoef> 0 [ {} ]", vals.join(" "))
     }
 
     /// Generate a valid 560-dim Rescale text line for use in tests.
     fn make_rescale_line() -> String {
-        let vals: Vec<String> = (0..560).map(|i| format!("{}", 0.1 + i as f32 * 0.0005)).collect();
+        let vals: Vec<String> = (0..560)
+            .map(|i| format!("{}", 0.1 + i as f32 * 0.0005))
+            .collect();
         format!("<LearnRateCoef> 0 [ {} ]", vals.join(" "))
     }
 
@@ -542,7 +587,8 @@ mod tests {
     #[test]
     fn test_parse_text_cmvn_valid() {
         let data = make_full_cmvn_text();
-        let vec = parse_text_cmvn_vector(data.as_bytes(), "AddShift").unwrap();
+        let vec =
+            parse_text_cmvn_vector(data.as_bytes(), "AddShift", Path::new(TEST_CMVN_PATH)).unwrap();
         assert_eq!(vec.len(), 560);
         let expected_first = -0.5;
         assert!((vec[0] - expected_first).abs() < 1e-5);
@@ -553,24 +599,27 @@ mod tests {
     #[test]
     fn test_parse_text_cmvn_missing_section() {
         let data = b"<Nnet>\n<SomethingElse> 560 560\n<LearnRateCoef> 0 [ 1.0 2.0 ]\n</Nnet>";
-        let result = parse_text_cmvn_vector(data, "AddShift");
+        let result = parse_text_cmvn_vector(data, "AddShift", Path::new(TEST_CMVN_PATH));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("AddShift"), "error should mention AddShift: {err}");
+        assert!(
+            err.contains("AddShift"),
+            "error should mention AddShift: {err}"
+        );
     }
 
     #[test]
     fn test_parse_text_cmvn_wrong_dim() {
         let data = b"<AddShift> 560 560\n<LearnRateCoef> 0 [ 1.0 2.0 3.0 ]\n<Rescale> 560 560\n<LearnRateCoef> 0 [ 4.0 5.0 6.0 ]\n";
         // parse_text_cmvn_vector doesn't check dim — should return 3 floats
-        let vec = parse_text_cmvn_vector(data, "AddShift").unwrap();
+        let vec = parse_text_cmvn_vector(data, "AddShift", Path::new(TEST_CMVN_PATH)).unwrap();
         assert_eq!(vec.len(), 3);
     }
 
     #[test]
     fn test_parse_text_cmvn_invalid_float() {
         let data = b"<AddShift> 560 560\n<LearnRateCoef> 0 [ 1.0 xyz 3.0 ]\n";
-        let result = parse_text_cmvn_vector(data, "AddShift");
+        let result = parse_text_cmvn_vector(data, "AddShift", Path::new(TEST_CMVN_PATH));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("xyz"), "error should mention 'xyz': {err}");
@@ -579,16 +628,27 @@ mod tests {
     #[test]
     fn test_parse_text_cmvn_non_utf8() {
         let data = vec![0xff, 0xfe, 0x00, 0x01]; // invalid UTF-8 bytes
-        let result = parse_text_cmvn_vector(&data, "AddShift");
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("UTF-8") || err.contains("valid"), "error should mention UTF-8: {err}");
+        let result = parse_text_cmvn_vector(&data, "AddShift", Path::new(TEST_CMVN_PATH));
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("UTF-8") || msg.contains("valid"),
+            "error should mention UTF-8: {msg}"
+        );
+        match &err {
+            FunasrError::InvalidCmvnFile { path, source, .. } => {
+                assert_eq!(path.as_path(), Path::new(TEST_CMVN_PATH));
+                assert!(source.is_some(), "UTF-8 failure must preserve its source");
+            }
+            other => panic!("expected InvalidCmvnFile, got {other:?}"),
+        }
     }
 
     #[test]
     fn test_parse_text_cmvn_end_to_end() {
         let data = make_full_cmvn_text();
-        let (means, inv_stds) = parse_kaldi_cmvn(data.as_bytes()).unwrap();
+        let (means, inv_stds) =
+            parse_kaldi_cmvn(data.as_bytes(), Path::new(TEST_CMVN_PATH)).unwrap();
         assert_eq!(means.len(), 560);
         assert_eq!(inv_stds.len(), 560);
         // Spot-check AddShift first value

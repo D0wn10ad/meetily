@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use tauri::{Manager, Runtime};
 use std::path::Path;
+use tauri::{Manager, Runtime};
 
 use crate::funasr_onnx::{FunasrError, FunasrFrontend, FunasrModel};
 
@@ -41,7 +41,10 @@ impl FunasrEngine {
         let cmvn_path = model_dir.join("am.mvn");
         let frontend = FunasrFrontend::new(&cmvn_path)?;
         let model = FunasrModel::new(model_dir)?;
-        log::info!("FunASR engine initialized with model from {}", model_dir.display());
+        log::info!(
+            "FunASR engine initialized with model from {}",
+            model_dir.display()
+        );
         Ok(FunasrEngine { model, frontend })
     }
 

@@ -30,10 +30,13 @@ impl FunasrModel {
     pub fn new(model_dir: &Path) -> Result<Self, FunasrError> {
         let model_path = model_dir.join("model.onnx");
         if !model_path.exists() {
-            return Err(FunasrError::ModelNotFound(model_path.display().to_string()));
+            return Err(FunasrError::ModelNotFound(model_path));
         }
 
-        log::info!("Loading FunASR Paraformer model from {}...", model_path.display());
+        log::info!(
+            "Loading FunASR Paraformer model from {}...",
+            model_path.display()
+        );
 
         let gpu_type = crate::audio::hardware_detector::HardwareProfile::detect().gpu_type;
         let providers = crate::audio::onnx_provider::get_onnx_providers(gpu_type);
@@ -46,7 +49,10 @@ impl FunasrModel {
             .with_parallel_execution(true)?
             .commit_from_file(&model_path)?;
 
-        log::info!("FunASR model loaded successfully from {}", model_path.display());
+        log::info!(
+            "FunASR model loaded successfully from {}",
+            model_path.display()
+        );
 
         // Log input/output shapes for debugging
         for input in &session.inputs {
@@ -66,9 +72,10 @@ impl FunasrModel {
 
         let token_path = model_dir.join("tokens.json");
         if !token_path.exists() {
-            return Err(FunasrError::InvalidTokenFile(
-                token_path.display().to_string(),
-            ));
+            return Err(FunasrError::InvalidTokenFile {
+                path: token_path,
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "file does not exist"),
+            });
         }
         let token_content = std::fs::read_to_string(&token_path)?;
         let token_list: Vec<String> = serde_json::from_str(&token_content)?;
@@ -100,13 +107,22 @@ impl FunasrModel {
         let t = feats_len as usize;
 
         // Input "speech": shape (1, T, 560), float32
-        let speech = ndarray::Array3::from_shape_vec((1, t, 560), features.to_vec())
-            .map_err(|e| FunasrError::DecodeError(e.to_string()))?;
+        let speech =
+            ndarray::Array3::from_shape_vec((1, t, 560), features.to_vec()).map_err(|e| {
+                FunasrError::DecodeError {
+                    message: e.to_string(),
+                    source: Some(Box::new(e)),
+                }
+            })?;
         let speech_tensor = TensorRef::from_array_view(speech.view())?;
 
         // Input "speech_lengths": shape (1,), int32
-        let lengths = ndarray::Array1::from_shape_vec(1, vec![feats_len])
-            .map_err(|e| FunasrError::DecodeError(e.to_string()))?;
+        let lengths = ndarray::Array1::from_shape_vec(1, vec![feats_len]).map_err(|e| {
+            FunasrError::DecodeError {
+                message: e.to_string(),
+                source: Some(Box::new(e)),
+            }
+        })?;
         let lengths_tensor = TensorRef::from_array_view(lengths.view())?;
 
         // Run inference
@@ -127,7 +143,10 @@ impl FunasrModel {
         let token_num: i32 = *outputs["token_num"]
             .try_extract_array::<i32>()?
             .first()
-            .ok_or_else(|| FunasrError::DecodeError("missing token_num output".into()))?;
+            .ok_or_else(|| FunasrError::DecodeError {
+                message: "missing token_num output".into(),
+                source: None,
+            })?;
 
         Ok((logits, token_num))
     }
@@ -178,7 +197,11 @@ mod tests {
             crate::audio::hardware_detector::GpuType::OpenCL,
         ] {
             let providers = crate::audio::onnx_provider::get_onnx_providers(gpu);
-            assert!(!providers.is_empty(), "Must always have at least CPU fallback for {:?}", gpu);
+            assert!(
+                !providers.is_empty(),
+                "Must always have at least CPU fallback for {:?}",
+                gpu
+            );
         }
     }
 }

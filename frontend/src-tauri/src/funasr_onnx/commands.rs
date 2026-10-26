@@ -1,9 +1,9 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::path::{Path, PathBuf};
-use std::fs;
-use tauri::{AppHandle, Emitter, Manager};
 use serde::Serialize;
 use serde_yaml::Value;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::AsyncWriteExt;
 
 static CANCEL_DOWNLOAD: AtomicBool = AtomicBool::new(false);
@@ -22,7 +22,10 @@ fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-    Ok(data_dir.join("models").join("funasr").join("paraformer-large"))
+    Ok(data_dir
+        .join("models")
+        .join("funasr")
+        .join("paraformer-large"))
 }
 
 async fn download_file(
@@ -52,9 +55,7 @@ async fn download_file(
     let total = if file_total_bytes > 0 {
         file_total_bytes
     } else {
-        response
-            .content_length()
-            .unwrap_or(0)
+        response.content_length().unwrap_or(0)
     };
 
     let mut file = tokio::fs::File::create(dest)
@@ -125,7 +126,16 @@ async fn download_with_fallback(
     stage_label: &str,
 ) -> Result<(), String> {
     // Try HF first
-    match download_file(hf_url, dest, app, base_progress, weight, file_total_bytes, stage_label).await
+    match download_file(
+        hf_url,
+        dest,
+        app,
+        base_progress,
+        weight,
+        file_total_bytes,
+        stage_label,
+    )
+    .await
     {
         Ok(()) => return Ok(()),
         Err(e) => {
@@ -136,7 +146,16 @@ async fn download_with_fallback(
     }
 
     // Fall back to ModelScope
-    download_file(ms_url, dest, app, base_progress, weight, file_total_bytes, stage_label).await
+    download_file(
+        ms_url,
+        dest,
+        app,
+        base_progress,
+        weight,
+        file_total_bytes,
+        stage_label,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -229,8 +248,7 @@ pub async fn funasr_download_model(app: AppHandle) -> Result<(), String> {
     std::fs::write(&tokens_path, &tokens_json)
         .map_err(|e| format!("Failed to write tokens.json: {}", e))?;
     // Clean up config.yaml (not needed at runtime)
-    std::fs::remove_file(&cfg_path)
-        .map_err(|e| format!("Failed to remove config.yaml: {}", e))?;
+    std::fs::remove_file(&cfg_path).map_err(|e| format!("Failed to remove config.yaml: {}", e))?;
 
     // Emit completion
     let _ = app.emit(
