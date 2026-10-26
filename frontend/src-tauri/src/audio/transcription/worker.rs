@@ -56,7 +56,7 @@ pub fn start_transcription_task<R: Runtime>(
         info!("🚀 Starting optimized parallel transcription task - guaranteeing zero chunk loss");
 
         // Initialize transcription engine (Whisper or Parakeet based on config)
-        let transcription_engine = match super::engine::get_or_init_transcription_engine(&app).await {
+        let transcription_engine = match super::get_or_init_transcription_engine(&app).await {
             Ok(engine) => engine,
             Err(e) => {
                 error!("Failed to initialize transcription engine: {}", e);

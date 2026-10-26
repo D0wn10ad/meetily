@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use crate::audio::transcription::provider::TranscriptionProvider;
+use crate::audio::transcription::TranscriptionProvider;
 use crate::audio::transcription::SherpaOnnxProvider;
 use crate::funasr_onnx::FunasrEngine;
 use tauri::{AppHandle, Emitter, Manager, Runtime};

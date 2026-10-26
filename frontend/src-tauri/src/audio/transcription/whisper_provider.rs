@@ -6,12 +6,18 @@ use super::provider::{TranscriptionError, TranscriptionProvider, TranscriptResul
 use async_trait::async_trait;
 use std::sync::Arc;
 
-/// Whisper transcription provider (wraps WhisperEngine)
+/// Whisper transcription provider (wraps WhisperEngine).
+///
+/// Kept for provider-abstraction parity: the Whisper path currently goes
+/// through `whisper_engine` directly, so this wrapper has no constructor call
+/// site yet. `#[allow(dead_code)]` records that intentionally.
+#[allow(dead_code)]
 pub struct WhisperProvider {
     engine: Arc<crate::whisper_engine::WhisperEngine>,
 }
 
 impl WhisperProvider {
+    #[allow(dead_code)] // no construction site yet; see struct doc
     pub fn new(engine: Arc<crate::whisper_engine::WhisperEngine>) -> Self {
         Self { engine }
     }

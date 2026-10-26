@@ -12,9 +12,11 @@ use async_trait::async_trait;
 /// Granular error types for transcription operations
 #[derive(Debug, Clone)]
 pub enum TranscriptionError {
+    #[allow(dead_code)] // reserved for providers that report a not-loaded engine
     ModelNotLoaded,
     AudioTooShort { samples: usize, minimum: usize },
     EngineFailed(String),
+    #[allow(dead_code)] // reserved for providers with language support
     UnsupportedLanguage(String),
 }
 

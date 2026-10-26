@@ -13,6 +13,7 @@ pub struct ParakeetProvider {
 }
 
 impl ParakeetProvider {
+    #[allow(dead_code)] // no construction site yet; see struct doc
     pub fn new(engine: Arc<crate::parakeet_engine::ParakeetEngine>) -> Self {
         Self { engine }
     }
