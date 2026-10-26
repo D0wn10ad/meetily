@@ -1,19 +1,32 @@
 use std::io::{self, BufRead, Write};
-use std::num::NonZeroU32;
 use std::path::PathBuf;
-use std::pin::pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
-use encoding_rs;
-use llama_cpp_2::context::params::LlamaContextParams;
-use llama_cpp_2::llama_backend::LlamaBackend;
-use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "backend")]
+use anyhow::Context;
+#[cfg(feature = "backend")]
+use encoding_rs;
+#[cfg(feature = "backend")]
+use llama_cpp_2::context::params::LlamaContextParams;
+#[cfg(feature = "backend")]
+use llama_cpp_2::llama_backend::LlamaBackend;
+#[cfg(feature = "backend")]
+use llama_cpp_2::llama_batch::LlamaBatch;
+#[cfg(feature = "backend")]
+use llama_cpp_2::model::params::LlamaModelParams;
+#[cfg(feature = "backend")]
+use llama_cpp_2::model::{AddBos, LlamaModel};
+#[cfg(feature = "backend")]
+use std::num::NonZeroU32;
+#[cfg(feature = "backend")]
+use std::pin::pin;
+#[cfg(feature = "backend")]
+use std::time::Instant;
 
 // ============================================================================
 // Protocol Messages (JSON over stdin/stdout)
@@ -115,6 +128,7 @@ impl SamplingConfig {
         }
     }
 
+    #[cfg_attr(not(feature = "backend"), allow(dead_code))]
     fn uses_penalties(&self) -> bool {
         self.penalty_last_n > 0
             && (self.presence_penalty > 0.0
@@ -128,6 +142,7 @@ impl SamplingConfig {
 // ============================================================================
 
 /// Detect available VRAM in GB
+#[cfg(feature = "backend")]
 fn detect_vram_gb() -> f32 {
     #[cfg(feature = "metal")]
     {
@@ -153,6 +168,7 @@ fn detect_vram_gb() -> f32 {
     4.0 // Conservative fallback
 }
 
+#[cfg(feature = "backend")]
 #[cfg(feature = "metal")]
 fn detect_metal_vram() -> Option<f32> {
     if let Ok(output) = std::process::Command::new("sysctl")
@@ -172,6 +188,7 @@ fn detect_metal_vram() -> Option<f32> {
     None
 }
 
+#[cfg(feature = "backend")]
 #[cfg(feature = "cuda")]
 fn detect_cuda_vram() -> Option<f32> {
     // Use nvidia-smi to query VRAM
@@ -189,6 +206,7 @@ fn detect_cuda_vram() -> Option<f32> {
 }
 
 /// Calculate safe GPU layer count based on VRAM, model file size, and context size
+#[cfg(feature = "backend")]
 fn calculate_gpu_layers(
     model_path: &PathBuf,
     model_layers: u32,
@@ -259,6 +277,7 @@ fn calculate_gpu_layers(
 }
 
 /// Get default GPU layer count with smart detection
+#[cfg(feature = "backend")]
 fn get_default_gpu_layers(model_path: &PathBuf, context_size: u32) -> u32 {
     let vram = detect_vram_gb();
     // TODO: Use actual model metadata instead of heuristics
@@ -279,25 +298,18 @@ fn get_default_gpu_layers(model_path: &PathBuf, context_size: u32) -> u32 {
 // ============================================================================
 
 struct ModelState {
+    #[cfg(feature = "backend")]
     backend: LlamaBackend,
+    #[cfg(feature = "backend")]
     model: Option<LlamaModel>,
+    #[cfg(feature = "backend")]
     model_path: Option<PathBuf>,
+    #[cfg(feature = "backend")]
     context_size: u32,
     last_activity: Arc<AtomicU64>,
 }
 
 impl ModelState {
-    fn new() -> Result<Self> {
-        let backend = LlamaBackend::init().context("Failed to init LlamaBackend")?;
-        Ok(Self {
-            backend,
-            model: None,
-            model_path: None,
-            context_size: 2048,
-            last_activity: Arc::new(AtomicU64::new(Self::current_timestamp())),
-        })
-    }
-
     fn current_timestamp() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -312,6 +324,20 @@ impl ModelState {
 
     fn seconds_since_activity(&self) -> u64 {
         Self::current_timestamp() - self.last_activity.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(feature = "backend")]
+impl ModelState {
+    fn new() -> Result<Self> {
+        let backend = LlamaBackend::init().context("Failed to init LlamaBackend")?;
+        Ok(Self {
+            backend,
+            model: None,
+            model_path: None,
+            context_size: 2048,
+            last_activity: Arc::new(AtomicU64::new(Self::current_timestamp())),
+        })
     }
 
     fn load_model_if_needed(&mut self, model_path: PathBuf, context_size: u32) -> Result<()> {
@@ -531,6 +557,35 @@ impl ModelState {
 
         self.update_activity();
         Ok(output)
+    }
+}
+
+#[cfg(not(feature = "backend"))]
+impl ModelState {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            last_activity: Arc::new(AtomicU64::new(Self::current_timestamp())),
+        })
+    }
+
+    fn load_model_if_needed(&mut self, _model_path: PathBuf, _context_size: u32) -> Result<()> {
+        self.update_activity();
+        anyhow::bail!(
+            "llama.cpp backend not compiled in: rebuild llama-helper with the `backend` feature enabled (it is on by default)"
+        )
+    }
+
+    fn generate(
+        &mut self,
+        _prompt: String,
+        _max_tokens: i32,
+        _sampling: SamplingConfig,
+        _stop_tokens: Vec<String>,
+    ) -> Result<String> {
+        self.update_activity();
+        anyhow::bail!(
+            "llama.cpp backend not compiled in: rebuild llama-helper with the `backend` feature enabled (it is on by default)"
+        )
     }
 }
 

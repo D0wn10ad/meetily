@@ -7,18 +7,33 @@ edition = "2021"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-llama-cpp-2 = "=0.1.146"
-# Pin the sys crate to the exact matching version: llama-cpp-2 0.1.146 declares
-# llama-cpp-sys-2 = "0.1.146" as a caret requirement, so unpinned resolution
-# drifts to 0.1.150 and fails to compile (removed API symbols).
-llama-cpp-sys-2 = "=0.1.146"
+# --- Exact llama.cpp pins (intentional: do not relax ad hoc) -----------------
+# Both crates are pinned with `=` so the llama-helper sidecar is built
+# reproducibly against a single fixed llama.cpp ABI. The wrapper and the sys
+# crate must move together: llama-cpp-2 0.1.146 declares
+# `llama-cpp-sys-2 = "0.1.146"` as a caret requirement, so unpinned resolution
+# drifts to 0.1.150 and fails to compile (removed API symbols). Relaxing this
+# pin needs CI that rebuilds the sidecar on every supported OS/arch, re-runs the
+# model smoke tests against the fixed .gguf fixtures, and bumps both crates in
+# one change together with Cargo.lock.
+#
+# Both crates are optional and pulled in by the default-on `backend` feature, so
+# `cargo check -p llama-helper --no-default-features` builds the protocol shim
+# without compiling the full llama.cpp C++ backend.
+llama-cpp-2 = { version = "=0.1.146", optional = true }
+llama-cpp-sys-2 = { version = "=0.1.146", optional = true }
 encoding_rs = "0.8"
 
 [features]
-default = []
-metal = ["llama-cpp-2/metal"]
-cuda = ["llama-cpp-2/cuda"]
-vulkan = ["llama-cpp-2/vulkan"]
+default = ["backend"]
+# Compiles the llama.cpp inference backend. Without it the binary is a
+# protocol-only shim: Generate requests fail at runtime with a clear
+# "backend not compiled in" error instead of requiring the C++ toolchain.
+backend = ["dep:llama-cpp-2", "dep:llama-cpp-sys-2"]
+# GPU execution providers require the backend they accelerate.
+metal = ["backend", "llama-cpp-2/metal"]
+cuda = ["backend", "llama-cpp-2/cuda"]
+vulkan = ["backend", "llama-cpp-2/vulkan"]
 
 [profile.release]
 codegen-units = 1
