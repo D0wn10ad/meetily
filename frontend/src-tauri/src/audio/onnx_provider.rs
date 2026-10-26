@@ -5,18 +5,23 @@
 //
 // # Selection strategy
 //
-// | `GpuType` | Providers tried (in order)                                       |
-// |-----------|------------------------------------------------------------------|
-// | `None`    | `CPUExecutionProvider` (no GPU path)                             |
-// | `OpenCL`  | `CPUExecutionProvider` (no dedicated ORT EP for OpenCL)          |
-// | `Metal`   | `CoreMLExecutionProvider` (CPUAndNeuralEngine) → CPU             |
-// | `Cuda`    | `CUDAExecutionProvider` → (`DirectMLExecutionProvider`) → CPU    |
-// | `Vulkan`  | `DirectMLExecutionProvider` (Windows) / `OpenVINO` (Linux) → CPU |
+// | `GpuType` | Providers tried (in order)                                             |
+// |-----------|------------------------------------------------------------------------|
+// | `None`    | `CPUExecutionProvider` (no GPU path)                                   |
+// | `OpenCL`  | `CPUExecutionProvider` (no dedicated ORT EP for OpenCL)                |
+// | `Metal`   | `CoreMLExecutionProvider` (CPUAndNeuralEngine) → CPU                   |
+// | `Cuda`    | `CUDAExecutionProvider` → (`DirectMLExecutionProvider`, Windows) → CPU |
+// | `Vulkan`  | `DirectMLExecutionProvider` (Windows) / `OpenVINOExecutionProvider` (Linux) → CPU |
 //
 // Each non-CPU EP is feature-gated. Compile with the corresponding Cargo
 // feature (e.g. `ort-coreml`, `ort-cuda`, `ort-directml`, `ort-openvino`)
 // to enable the hardware-accelerated path.  If a feature is disabled the
 // chain silently degrades to CPU-only.
+//
+// `DirectMLExecutionProvider` is Windows-only: it is the Windows
+// cross-platform fallback when the CUDA provider is unavailable (the `Cuda`
+// branch) and also the Windows `Vulkan` path. `OpenVINOExecutionProvider` is
+// Linux-only.
 
 use log::info;
 
@@ -32,10 +37,10 @@ use ort::execution_providers::CoreMLExecutionProvider;
 #[cfg(feature = "ort-cuda")]
 use ort::execution_providers::CUDAExecutionProvider;
 
-#[cfg(feature = "ort-directml")]
+#[cfg(all(target_os = "windows", feature = "ort-directml"))]
 use ort::execution_providers::DirectMLExecutionProvider;
 
-#[cfg(feature = "ort-openvino")]
+#[cfg(all(target_os = "linux", feature = "ort-openvino"))]
 use ort::execution_providers::OpenVINOExecutionProvider;
 
 /// Map a detected [`GpuType`] to an ordered list of ORT execution providers.
@@ -80,7 +85,7 @@ pub fn get_onnx_providers(gpu_type: GpuType) -> Vec<ExecutionProviderDispatch> {
                 info!("ort-cuda not enabled — skipping CUDA EP");
             }
 
-            #[cfg(feature = "ort-directml")]
+            #[cfg(all(target_os = "windows", feature = "ort-directml"))]
             {
                 info!("Adding DirectML execution provider (CUDA supplementary)");
                 providers.push(DirectMLExecutionProvider::default().build());
@@ -96,8 +101,8 @@ pub fn get_onnx_providers(gpu_type: GpuType) -> Vec<ExecutionProviderDispatch> {
                 providers.push(DirectMLExecutionProvider::default().build());
             }
 
-            // On Linux  (and other non-Windows platforms), use OpenVINO.
-            #[cfg(all(not(target_os = "windows"), feature = "ort-openvino"))]
+            // On Linux, use OpenVINO.
+            #[cfg(all(target_os = "linux", feature = "ort-openvino"))]
             {
                 info!("Adding OpenVINO execution provider (Vulkan / Linux)");
                 providers.push(OpenVINOExecutionProvider::default().build());
@@ -151,7 +156,7 @@ mod tests {
         #[cfg(feature = "ort-cuda")]
         assert!(
             providers.len() >= 2,
-            "With ort-cuda, Cuda should have >=2 providers, got {}",
+            "With ort-cuda, CUDA should have >=2 providers, got {}",
             providers.len()
         );
         #[cfg(not(feature = "ort-cuda"))]
@@ -166,17 +171,46 @@ mod tests {
     #[test]
     fn test_cpu_last_in_chain() {
         // CPU is always the last entry in the chain for every GpuType variant.
-        for gpu_type in &[
-            GpuType::None,
-            GpuType::Metal,
-            GpuType::Cuda,
-            GpuType::Vulkan,
-            GpuType::OpenCL,
-        ] {
-            let providers = get_onnx_providers(*gpu_type);
+        //
+        // `GpuType` does not derive `EnumIter` (and its defining module,
+        // `audio/hardware_detector.rs`, is out of scope for this change), so the
+        // variants are enumerated here through an exhaustive `match` rather than a
+        // hand-maintained `&[...]` slice. The wildcard arm panics if a `GpuType`
+        // value reaches this match that the arms below do not cover.
+        #[allow(unreachable_patterns)]
+        fn covered_variants(probe: GpuType) -> Vec<GpuType> {
+            match probe {
+                GpuType::None
+                | GpuType::Metal
+                | GpuType::Cuda
+                | GpuType::Vulkan
+                | GpuType::OpenCL => vec![
+                    GpuType::None,
+                    GpuType::Metal,
+                    GpuType::Cuda,
+                    GpuType::Vulkan,
+                    GpuType::OpenCL,
+                ],
+                other => panic!("uncovered GpuType variant: {other:?}"),
+            }
+        }
+
+        for gpu_type in covered_variants(GpuType::None) {
+            let providers = get_onnx_providers(gpu_type);
             assert!(
                 !providers.is_empty(),
                 "Every GpuType must produce at least the CPU provider"
+            );
+
+            // `ExecutionProviderDispatch` does not publicly expose the
+            // `ExecutionProvider` trait's `name()` accessor (its `inner` field is
+            // crate-private), so assert on its `Debug` output, whose struct name is
+            // the ORT provider identifier (e.g. `CPUExecutionProvider`).
+            let last = providers.last().expect("provider chain must not be empty");
+            let last_debug = format!("{last:?}");
+            assert!(
+                last_debug.starts_with("CPUExecutionProvider"),
+                "CPU provider must be last for {gpu_type:?}, got {last_debug}"
             );
         }
     }
