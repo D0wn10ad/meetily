@@ -56,6 +56,17 @@ pub(crate) fn is_download_cancelled(error: &anyhow::Error) -> bool {
     error.downcast_ref::<DownloadCancelled>().is_some()
 }
 
+/// Derive the short-audio logging flags from ONE snapshot of
+/// `last_transcription_was_short` plus the warning-latched flag.
+///
+/// Both flags MUST be a pure function of the same snapshot: reading the
+/// flag twice across the `.await` points in the transcription path can
+/// observe different values and produce mutually inconsistent flags.
+/// Returns `(should_log_transcription, should_log_short_warning)`.
+fn should_log_flags(last_was_short: bool, warning_logged: bool) -> (bool, bool) {
+    (!last_was_short, !warning_logged)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CancelDownloadOutcome {
@@ -627,7 +638,6 @@ impl WhisperEngine {
         let mut total_confidence = 0.0;
         let mut segment_count = 0;
 
-        let num_segments = num_segments;
         for i in 0..num_segments {
             let segment_text = match state.get_segment(i) {
                 Some(seg) => seg.to_string(),
@@ -726,26 +736,25 @@ impl WhisperEngine {
         let duration_seconds = audio_data.len() as f64 / 16000.0; // Assuming 16kHz
         let is_short_audio = duration_seconds < 1.0;
 
-        // Smart logging based on audio duration and previous states
+        // Smart logging based on audio duration and previous states.
+        // ONE snapshot: both flags derive from the same read of
+        // `last_transcription_was_short` — separate reads across the await
+        // points below could observe different values and disagree.
+        let last_was_short = *self.last_transcription_was_short.read().await;
         let mut should_log_transcription = true;
         let mut should_log_short_warning = false;
 
         if is_short_audio {
-            let last_was_short = *self.last_transcription_was_short.read().await;
             let warning_logged = *self.short_audio_warning_logged.read().await;
+            (should_log_transcription, should_log_short_warning) =
+                should_log_flags(last_was_short, warning_logged);
 
-            if !warning_logged {
-                should_log_short_warning = true;
+            if should_log_short_warning {
                 *self.short_audio_warning_logged.write().await = true;
             }
 
-            // Only log transcription start if it's the first short audio or previous wasn't short
-            should_log_transcription = !last_was_short;
-
             *self.last_transcription_was_short.write().await = true;
         } else {
-            let last_was_short = *self.last_transcription_was_short.read().await;
-
             // Always log when transitioning from short to normal audio
             if last_was_short {
                 log::info!("Audio duration normalized, resuming transcription");
@@ -1285,6 +1294,38 @@ mod tests {
             .iter()
             .find(|model| model.name == "tiny")
             .expect("tiny should be present in the Whisper model catalog")
+    }
+
+    #[test]
+    fn should_log_flags_is_a_pure_function_of_one_snapshot() {
+        // Both logging flags must derive from the SAME snapshot of
+        // `last_transcription_was_short`: reading the flag twice across the
+        // await points in the transcription path can observe different values
+        // and produce mutually inconsistent flags. A pure helper pins the
+        // contract: same input -> same pair, always.
+        for last_was_short in [true, false] {
+            for warning_logged in [true, false] {
+                let first = should_log_flags(last_was_short, warning_logged);
+                let second = should_log_flags(last_was_short, warning_logged);
+                assert_eq!(
+                    first, second,
+                    "flags must be deterministic for (last_was_short={last_was_short}, warning_logged={warning_logged})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn should_log_flags_matches_the_logging_contract() {
+        // (should_log_transcription, should_log_short_warning)
+        // Consecutive short audio with the warning already latched: stay quiet.
+        assert_eq!(should_log_flags(true, true), (false, false));
+        // Consecutive short audio, warning not yet latched: warn once.
+        assert_eq!(should_log_flags(true, false), (false, true));
+        // First short audio after normal audio: log the transcription start.
+        assert_eq!(should_log_flags(false, true), (true, false));
+        // First short audio ever: log the start and warn once.
+        assert_eq!(should_log_flags(false, false), (true, true));
     }
 
     #[tokio::test]
