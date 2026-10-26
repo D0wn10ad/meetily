@@ -5,11 +5,18 @@ const SOS_ID: usize = 1;
 const EOS_ID: usize = 2;
 const VOCAB_SIZE: usize = 8404;
 
+/// The model reports one extra token per decode step, so the valid token
+/// count is `token_num - PRED_BIAS`. This is a FunASR API invariant — do
+/// not change the value.
+const PRED_BIAS: i32 = 1;
+
 /// Post-process decoded text by removing artifacts and cleaning up.
 ///
-/// Current operations:
+/// This is the SINGLE choke point for BPE `@@` continuation-marker
+/// stripping (the token loop concatenates tokens verbatim):
 /// - Removes BPE/SentencePiece `@@` continuation markers (merges subword pieces)
 /// - Removes special token substrings (`<s>`, `</s>`, `<unk>`, `<blank>`)
+/// - Normalizes whitespace to single spaces and trims
 ///
 /// This function is intended as the single extension point for future
 /// post-processing features (e.g. automatic punctuation restoration,
@@ -26,17 +33,23 @@ fn postprocess(text: &str) -> String {
         .replace("<unk>", "")
         .replace("<blank>", "");
 
-    // 3. Normalize whitespace and trim
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    // 3. Normalize whitespace to single spaces (no temporary Vec allocation)
+    let mut normalized = String::new();
+    for word in text.split_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.push_str(word);
+    }
 
-    text.trim().to_string()
+    normalized
 }
 
 /// Decode model output logits into text.
 ///
-/// BPE subword pieces (ending with `@@`) are merged during token lookup.
-/// The result is then passed through [`postprocess()`] for cleanup
-/// (special token removal, BPE artifact stripping).
+/// Tokens are concatenated verbatim during lookup; BPE subword pieces
+/// (ending with `@@`) are merged afterwards in [`postprocess()`], which is
+/// also responsible for special-token removal and whitespace normalization.
 pub fn decode(
     logits: &[f32],
     token_num: i32,
@@ -60,15 +73,15 @@ pub fn decode(
 
     let num_frames = logits.len() / VOCAB_SIZE;
 
-    // 2. Argmax per timestep
+    // 2. Argmax per timestep (fails loudly on NaN instead of silently
+    //    picking an arbitrary index)
     let tokens: Vec<usize> = (0..num_frames)
         .map(|t| {
             let start = t * VOCAB_SIZE;
             let end = start + VOCAB_SIZE;
-            let frame = &logits[start..end];
-            argmax(frame)
+            argmax(&logits[start..end])
         })
-        .collect();
+        .collect::<Result<Vec<_>, FunasrError>>()?;
 
     // 3. Filter special tokens
     let filtered: Vec<usize> = tokens
@@ -77,24 +90,16 @@ pub fn decode(
         .filter(|&id| id != BLANK_ID && id != SOS_ID && id != EOS_ID)
         .collect();
 
-    // 4. Trim to valid length
-    // The model reports one extra token, so subtract pred_bias = 1
-    let valid_len = (token_num - 1).max(0) as usize;
+    // 4. Trim to valid length (see the PRED_BIAS doc for the invariant)
+    let valid_len = (token_num - PRED_BIAS).max(0) as usize;
     let valid_len = valid_len.min(filtered.len());
     let selected = &filtered[..valid_len];
 
-    // 5. Token lookup
-    let mut decoded = String::new();
+    // 5. Token lookup (verbatim concatenation; @@ is stripped in postprocess)
+    let mut decoded = String::with_capacity(num_frames * 4);
     for &token_id in selected {
         if token_id < token_list.len() {
-            let token = &token_list[token_id];
-            // Strip BPE continuation marker @@ during concatenation
-            // so subword pieces merge properly: "sc@@" + "al@@" + "e" → "scale"
-            if let Some(stripped) = token.strip_suffix("@@") {
-                decoded.push_str(stripped);
-            } else {
-                decoded.push_str(token);
-            }
+            decoded.push_str(&token_list[token_id]);
         } else {
             log::warn!(
                 "FunASR decode: token {} out of range (vocab size {})",
@@ -119,13 +124,26 @@ pub fn decode(
 }
 
 /// Find the index of the maximum value in a slice.
-fn argmax(slice: &[f32]) -> usize {
-    slice
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(idx, _)| idx)
-        .unwrap_or(0)
+///
+/// Returns an error when the slice contains NaN: `partial_cmp` yields `None`
+/// for NaN, and the previous `unwrap_or(Ordering::Equal)` silently picked an
+/// arbitrary index in that case.
+fn argmax(slice: &[f32]) -> Result<usize, FunasrError> {
+    let mut best_idx = 0;
+    let mut best_val = f32::NEG_INFINITY;
+    for (idx, &value) in slice.iter().enumerate() {
+        if value.is_nan() {
+            return Err(FunasrError::DecodeError {
+                message: format!("argmax encountered NaN at index {idx}"),
+                source: None,
+            });
+        }
+        if value > best_val {
+            best_val = value;
+            best_idx = idx;
+        }
+    }
+    Ok(best_idx)
 }
 
 #[cfg(test)]
@@ -263,5 +281,43 @@ mod tests {
         assert_eq!(postprocess("pro@@ce@@ss@@or"), "processor");
         assert_eq!(postprocess("hello<s></s>"), "hello");
         assert_eq!(postprocess("  hello   world  "), "hello world");
+    }
+
+    #[test]
+    fn test_argmax_nan_returns_error() {
+        let err = argmax(&[0.0, f32::NAN, 1.0]).unwrap_err();
+        match err {
+            FunasrError::DecodeError { message, .. } => {
+                assert!(message.contains("NaN"), "message: {message}");
+            }
+            other => panic!("Expected DecodeError, got: {other:?}"),
+        }
+        // Sanity: without NaN the max index is still correct.
+        assert_eq!(argmax(&[0.0, 5.0, 1.0]).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_decode_nan_logits_fail_loudly() {
+        let tokens = vec![String::new(); 8404];
+        let mut logits = vec![0.0f32; 2 * 8404];
+        logits[8404 + 3] = f32::NAN;
+        let result = decode(&logits, 2, &tokens);
+        assert!(result.is_err(), "NaN logits must not decode silently");
+    }
+
+    #[test]
+    fn test_decode_golden_bpe_merge() {
+        // Golden test: the @@ merge output must stay byte-identical now that
+        // the strip lives only in postprocess() (was duplicated in the loop).
+        let mut tokens = vec![String::new(); 8404];
+        tokens[3] = "sc@@".to_string();
+        tokens[4] = "al@@".to_string();
+        tokens[5] = "e".to_string();
+        let mut logits = vec![0.0f32; 3 * 8404];
+        logits[0 * 8404 + 3] = 10.0;
+        logits[1 * 8404 + 4] = 10.0;
+        logits[2 * 8404 + 5] = 10.0;
+        let result = decode(&logits, 4, &tokens).unwrap();
+        assert_eq!(result, "scale");
     }
 }
