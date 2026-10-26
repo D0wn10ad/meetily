@@ -7,19 +7,96 @@
 //! It imports just `OrtGetApiBase@ordinal1` from onnxruntime, satisfied by the
 //! app's own sha-verified onnxruntime.dll — so no onnxruntime DLL is copied here.
 
-use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[allow(dead_code)]
+mod build_env {
+    include!("../src/build_env.rs");
+}
+
+use build_env::{
+    describe_prebuilt_search, expect_profile, find_prebuilt_dir, resolve_profile_dir,
+    staged_file_state, StagedFileState,
+};
+
+fn is_file_checked(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(metadata) => metadata.is_file(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!("Failed to inspect {}: {}", path.display(), error),
+    }
+}
+
+fn resolve_prebuilt_root(profile_dir: &Path) -> PathBuf {
+    if let Some(override_dir) = std::env::var_os("SHERPA_ONNX_PREBUILT") {
+        let dir = PathBuf::from(override_dir);
+        return match std::fs::metadata(&dir) {
+            Ok(metadata) if metadata.is_dir() => dir,
+            Ok(_) => panic!(
+                "SHERPA_ONNX_PREBUILT={} is not a directory; point it at the prebuilt \
+                 sherpa-onnx cache root (the directory containing sherpa-onnx-c-api.dll \
+                 or <archive>/lib/sherpa-onnx-c-api.dll)",
+                dir.display()
+            ),
+            Err(error) => panic!(
+                "Failed to inspect SHERPA_ONNX_PREBUILT={}: {}",
+                dir.display(),
+                error
+            ),
+        };
+    }
+
+    find_prebuilt_dir(profile_dir).unwrap_or_else(|| {
+        panic!(
+            "Could not find a `sherpa-onnx-prebuilt` directory in any ancestor of {} \
+             (searched: {}). Fix: set SHERPA_ONNX_PREBUILT to the directory containing the \
+             prebuilt sherpa-onnx-c-api.dll, or run the sherpa-onnx prebuilt download step.",
+            profile_dir.display(),
+            describe_prebuilt_search(profile_dir)
+        )
+    })
+}
 
 /// Locates `sherpa-onnx-c-api.dll` inside sherpa-onnx-sys's prebuilt cache
 /// (`<target>/sherpa-onnx-prebuilt/<archive>/lib/`), preferring the shared
-/// archive. Returns None if not found.
-fn find_prebuilt_dll(target_dir: &Path) -> Option<std::path::PathBuf> {
-    let prebuilt = target_dir.join("sherpa-onnx-prebuilt");
-    let mut shared: Option<std::path::PathBuf> = None;
-    let mut any: Option<std::path::PathBuf> = None;
-    for entry in std::fs::read_dir(&prebuilt).ok()?.flatten() {
+/// archive. Returns None if the cache exists but holds no matching DLL.
+fn find_prebuilt_dll(profile_dir: &Path) -> Option<PathBuf> {
+    let prebuilt = resolve_prebuilt_root(profile_dir);
+
+    let direct = prebuilt.join("sherpa-onnx-c-api.dll");
+    if is_file_checked(&direct) {
+        return Some(direct);
+    }
+
+    let mut shared: Option<PathBuf> = None;
+    let mut any: Option<PathBuf> = None;
+    let entries = match std::fs::read_dir(&prebuilt) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!(
+                "cargo:warning=sherpa-onnx prebuilt cache {} disappeared while staging; \
+                 continuing without a fallback copy",
+                prebuilt.display()
+            );
+            return None;
+        }
+        Err(error) => panic!(
+            "Failed to read sherpa-onnx prebuilt cache directory {}: {}",
+            prebuilt.display(),
+            error
+        ),
+    };
+
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!(
+                "Failed to read an entry in sherpa-onnx prebuilt cache {}: {}",
+                prebuilt.display(),
+                error
+            )
+        });
         let lib = entry.path().join("lib").join("sherpa-onnx-c-api.dll");
-        if lib.exists() {
+        if is_file_checked(&lib) {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.contains("shared") {
                 shared = Some(lib);
@@ -42,38 +119,24 @@ pub fn stage_sherpa_dlls() {
     // OUT_DIR looks like target/<triple>/<profile>/build/<crate>/out (with
     // --target) or target/<profile>/build/<crate>/out (without); walking
     // ancestors finds the profile dir in both layouts.
-    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set by cargo");
-    let profile = std::env::var("PROFILE").unwrap_or_default();
-    let profile_dir = Path::new(&out_dir)
-        .ancestors()
-        .find(|p| p.file_name() == Some(OsStr::new(&profile)))
-        .expect("could not resolve cargo profile dir from OUT_DIR");
-
-    // Cargo target dir: <target>/<triple>/<profile> (with --target) or
-    // <target>/<profile> (without). The sherpa-onnx-sys prebuilt cache lives
-    // at <target>/sherpa-onnx-prebuilt.
-    let target_dir = profile_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .filter(|p| p.file_name() == Some(OsStr::new("target")))
-        .unwrap_or_else(|| {
-            profile_dir
-                .parent()
-                .expect("could not resolve cargo target dir from OUT_DIR")
-        });
+    let out_dir =
+        std::env::var("OUT_DIR").expect("OUT_DIR env var not set by cargo; cannot stage DLLs");
+    let profile = expect_profile(std::env::var("PROFILE"));
+    let profile_dir = resolve_profile_dir(Path::new(&out_dir), &profile);
 
     let src = profile_dir.join("sherpa-onnx-c-api.dll");
     let dst_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries/sherpa");
     std::fs::create_dir_all(&dst_dir)
-        .expect("failed to create binaries/sherpa staging directory");
+        .expect("Failed to create binaries/sherpa staging directory");
     let dst = dst_dir.join("sherpa-onnx-c-api.dll");
 
     // Skip identical copies: under `tauri dev` the DLL may be loaded and
     // locked by a running app, so a redundant copy would fail for no reason.
+    // Compare size AND mtime so a same-size rebuild is not mistaken for fresh.
     if dst.exists() {
         if let (Ok(src_meta), Ok(dst_meta)) = (std::fs::metadata(&src), std::fs::metadata(&dst))
         {
-            if src_meta.len() == dst_meta.len() {
+            if staged_file_state(&src_meta, &dst_meta) == StagedFileState::Fresh {
                 return;
             }
         }
@@ -99,10 +162,15 @@ pub fn stage_sherpa_dlls() {
             // The profile-dir copy can be missing when the rust-cache restore
             // is partial (sherpa-onnx-sys's build script is cached and does not
             // re-copy its runtime DLLs). Fall back to the prebuilt cache.
-            if let Some(prebuilt_src) = find_prebuilt_dll(&target_dir) {
+            if let Some(prebuilt_src) = find_prebuilt_dll(&profile_dir) {
                 if let Err(fb_err) = std::fs::copy(&prebuilt_src, &dst) {
                     panic!(
-                        "failed to stage sherpa-onnx-c-api.dll from prebuilt cache {}: {}",
+                        "Failed to stage sherpa-onnx-c-api.dll from prebuilt cache {}: {}. \
+                         The `sherpa-onnx` `shared` feature must be enabled for Windows (check \
+                         the [target.'cfg(target_os = \"windows\")'.dependencies] sherpa-onnx \
+                         entry in Cargo.toml). Fix: set SHERPA_ONNX_PREBUILT to the directory \
+                         containing the prebuilt sherpa-onnx-c-api.dll, or run the sherpa-onnx \
+                         prebuilt download step.",
                         prebuilt_src.display(),
                         fb_err
                     );
@@ -113,9 +181,11 @@ pub fn stage_sherpa_dlls() {
                 );
             } else {
                 panic!(
-                    "failed to stage sherpa-onnx-c-api.dll: source {} not found ({}). \
-                     The sherpa-onnx `shared` feature appears to be inactive on Windows \
-                     (expected it in Cargo.toml target cfg for windows).",
+                    "Failed to stage sherpa-onnx-c-api.dll: source {} not found ({}). \
+                     The `sherpa-onnx` `shared` feature must be enabled for Windows (check the \
+                     [target.'cfg(target_os = \"windows\")'.dependencies] sherpa-onnx entry in \
+                     Cargo.toml). Fix: set SHERPA_ONNX_PREBUILT to the directory containing the \
+                     prebuilt sherpa-onnx-c-api.dll, or run the sherpa-onnx prebuilt download step.",
                     src.display(),
                     err
                 );
