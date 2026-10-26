@@ -13,7 +13,7 @@ pub mod permissions;
 // NEW: Device detection and diagnostics for adaptive buffering
 pub mod device_detection;
 pub mod diagnostics;
-pub mod ffmpeg_mixer;  // NEW: FFmpeg-style adaptive audio mixer
+pub(crate) mod ffmpeg_mixer;  // NEW: FFmpeg-style adaptive audio mixer
 
 // New simplified audio system
 pub mod recording_state;
@@ -23,15 +23,15 @@ pub mod recording_manager;
 pub mod recording_commands;
 pub mod recording_preferences;
 pub mod recording_saver;
-pub mod incremental_saver;  // NEW: Incremental audio saving with checkpoints
+pub(crate) mod incremental_saver;  // NEW: Incremental audio saving with checkpoints
 pub mod level_monitor;
-pub mod simple_level_monitor;
+pub(crate) mod simple_level_monitor;
 pub mod buffer_pool;
 pub mod post_processor;
 pub mod hardware_detector;
 pub mod onnx_provider;
-pub mod async_logger;
-pub mod batch_processor;
+pub(crate) mod async_logger;
+pub(crate) mod batch_processor;
 pub mod system_detector;
 pub mod system_audio_commands;
 pub mod device_monitor;  // NEW: Device disconnect/reconnect monitoring
@@ -100,7 +100,10 @@ pub use hardware_detector::{HardwareProfile, AdaptiveWhisperConfig, PerformanceT
 pub use encode::{
     encode_single_audio, AudioInput
 };
-pub use device_monitor::{AudioDeviceMonitor, DeviceEvent, DeviceMonitorType};
+// Crate-internal: every consumer (recording_manager.rs, recording_commands.rs) imports via
+// `super::device_monitor::` directly; no code outside this crate uses these names.
+#[allow(unused_imports)] // kept as the declared internal surface per plan T22
+pub(crate) use device_monitor::{AudioDeviceMonitor, DeviceEvent, DeviceMonitorType};
 
 // Export device detection and diagnostics
 pub use device_detection::{InputDeviceKind, calculate_buffer_timeout};
@@ -110,7 +113,10 @@ pub use diagnostics::{
 };
 
 // Export FFmpeg mixer
-pub use ffmpeg_mixer::{FFmpegAudioMixer, BufferStats, RNNOISE_APPLY_ENABLED};
+// Crate-internal: pipeline.rs reads RNNOISE_APPLY_ENABLED via `super::ffmpeg_mixer::`;
+// FFmpegAudioMixer/BufferStats currently have no consumers outside ffmpeg_mixer.rs itself.
+#[allow(unused_imports)] // kept as the declared internal surface per plan T22
+pub(crate) use ffmpeg_mixer::{FFmpegAudioMixer, BufferStats, RNNOISE_APPLY_ENABLED};
 
 pub use vad::{extract_speech_16k};
 

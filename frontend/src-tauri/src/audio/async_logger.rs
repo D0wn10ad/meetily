@@ -1,3 +1,6 @@
+// T22 confined this module to `pub(crate)`; the logger is currently unwired (only its own
+// macros reference it), so dead_code is expected here.
+#![allow(dead_code)]
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;

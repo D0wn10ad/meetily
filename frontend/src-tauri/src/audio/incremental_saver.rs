@@ -215,6 +215,7 @@ impl IncrementalAudioSaver {
     }
 
     /// Get the meeting folder path
+    #[allow(dead_code)] // T22 confined the module to pub(crate); this accessor is currently unused
     pub fn get_meeting_folder(&self) -> &PathBuf {
         &self.meeting_folder
     }

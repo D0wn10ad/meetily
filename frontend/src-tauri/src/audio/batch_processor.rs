@@ -1,3 +1,6 @@
+// T22 confined this module to `pub(crate)`; AudioMetricsBatcher is consumed by pipeline.rs
+// but several accessor methods/fields are currently unused, so dead_code is expected here.
+#![allow(dead_code)]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};

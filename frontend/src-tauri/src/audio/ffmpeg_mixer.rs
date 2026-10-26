@@ -10,6 +10,9 @@
 // 4. Timestamp-aware mixing to maintain sync
 // 5. Professional audio mixing with RMS-based ducking
 
+// T22 confined this module to `pub(crate)`; the mixer structs are currently vestigial
+// (only RNNOISE_APPLY_ENABLED is consumed, by pipeline.rs), so dead_code is expected here.
+#![allow(dead_code)]
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use log::{debug, warn, info};
