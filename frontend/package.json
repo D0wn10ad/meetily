@@ -57,7 +57,6 @@
         "@remirror/react": "^3.0.1",
         "@tanstack/react-virtual": "^3.13.13",
         "@tauri-apps/api": "^2.6.0",
-        "@tauri-apps/plugin-fs": "^2.4.0",
         "@tauri-apps/plugin-notification": "~2.3.1",
         "@tauri-apps/plugin-os": "^2.3.2",
         "@tauri-apps/plugin-process": "^2.3.0",
@@ -86,6 +85,7 @@
         "tailwindcss-animate": "^1.0.7",
         "zod": "^3.25.71"
     },
+    "//pnpm-overrides": "ProseMirror is pinned via pnpm.overrides (model 1.25.3, state 1.4.3, view 1.41.3, transform 1.10.4, tables 1.8.1) so @blocknote, @tiptap and @remirror all resolve to one ProseMirror singleton (the webpack aliases in next.config.js keep them on that singleton). This is a deliberate accepted risk; never bump these pins independently — see AGENTS.md constraint #2.",
     "pnpm": {
         "overrides": {
             "prosemirror-model": "1.25.3",
@@ -107,6 +107,8 @@
         "@types/react-test-renderer": "18.3.1",
         "autoprefixer": "^10.0.1",
         "concurrently": "^8.2.2",
+        "eslint": "9.17.0",
+        "eslint-config-next": "16.0.0",
         "postcss": "^8",
         "react-test-renderer": "18.3.1",
         "tailwindcss": "^3.4.1",
