@@ -50,11 +50,11 @@ impl SherpaOnnxEngine {
 
         // Create recognizer
         let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
-            SherpaOnnxError::SherpaOnnx(
-                "Failed to create sherpa-onnx OfflineRecognizer \
-                 — model files may be invalid or incompatible"
+            SherpaOnnxError::SherpaOnnx {
+                message: "Failed to create sherpa-onnx OfflineRecognizer \
+                          — model files may be invalid or incompatible"
                     .into(),
-            )
+            }
         })?;
 
         Ok(Self { recognizer })
@@ -78,7 +78,9 @@ impl SherpaOnnxEngine {
         self.recognizer.decode(&stream);
 
         let result = stream.get_result().ok_or_else(|| {
-            SherpaOnnxError::SherpaOnnx("No recognition result returned".into())
+            SherpaOnnxError::SherpaOnnx {
+                message: "No recognition result returned".into(),
+            }
         })?;
 
         Ok(result.text)
@@ -95,7 +97,7 @@ mod tests {
         let result = SherpaOnnxEngine::new(Path::new("/tmp/nonexistent_sherpa_12345"));
         assert!(result.is_err(), "Nonexistent dir should fail");
         match result {
-            Err(SherpaOnnxError::ModelNotFound(_)) => {} // expected
+            Err(SherpaOnnxError::ModelNotFound { .. }) => {} // expected
             _ => panic!("Expected ModelNotFound error, got {:?}", result),
         }
     }
@@ -106,7 +108,8 @@ mod tests {
         fs::write(dir.path().join("model.int8.onnx"), "dummy").ok();
         let result = SherpaOnnxEngine::new(dir.path());
         match result {
-            Err(SherpaOnnxError::ModelNotFound(ref msg)) => {
+            Err(e @ SherpaOnnxError::ModelNotFound { .. }) => {
+                let msg = e.to_string();
                 assert!(
                     msg.contains("tokens.txt"),
                     "Error should mention tokens.txt: {}",
@@ -123,7 +126,8 @@ mod tests {
         fs::write(dir.path().join("tokens.txt"), "a b c").ok();
         let result = SherpaOnnxEngine::new(dir.path());
         match result {
-            Err(SherpaOnnxError::ModelNotFound(ref msg)) => {
+            Err(e @ SherpaOnnxError::ModelNotFound { .. }) => {
+                let msg = e.to_string();
                 assert!(
                     msg.contains(".onnx"),
                     "Error should mention .onnx: {}",
@@ -153,7 +157,7 @@ mod tests {
             "Fake ONNX file should fail to create recognizer"
         );
         match result {
-            Err(SherpaOnnxError::SherpaOnnx(_)) => {} // expected
+            Err(SherpaOnnxError::SherpaOnnx { .. }) => {} // expected
             other => panic!("Expected SherpaOnnxError error, got {:?}", other),
         }
     }
@@ -161,7 +165,7 @@ mod tests {
     #[test]
     fn test_transcribe_empty_audio_returns_error() {
         let err = SherpaOnnxError::EmptyAudio;
-        let msg = format!("{}", err);
+        let msg = err.to_string();
         assert!(
             msg.contains("Empty audio"),
             "Display should mention Empty audio: {}",

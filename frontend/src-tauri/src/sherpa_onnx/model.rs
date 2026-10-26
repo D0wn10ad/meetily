@@ -34,7 +34,9 @@ const SENSEVOICE_REQUIRED_FILES: &[&str] = &["tokens.txt"];
 /// Find the first `.onnx` file in a model directory.
 pub fn find_onnx_model_file(model_dir: &Path) -> Result<PathBuf, SherpaOnnxError> {
     if !model_dir.exists() {
-        return Err(SherpaOnnxError::ModelNotFound(model_dir.display().to_string()));
+        return Err(SherpaOnnxError::ModelNotFound {
+            path: model_dir.to_path_buf(),
+        });
     }
     for entry in std::fs::read_dir(model_dir).map_err(SherpaOnnxError::from)? {
         let entry = entry.map_err(SherpaOnnxError::from)?;
@@ -43,9 +45,11 @@ pub fn find_onnx_model_file(model_dir: &Path) -> Result<PathBuf, SherpaOnnxError
             return Ok(path);
         }
     }
-    Err(SherpaOnnxError::ModelNotFound(
-        format!("No .onnx file found in {}", model_dir.display()),
-    ))
+    // Glob-style placeholder: the `.onnx` file may have any name, so no
+    // concrete missing path exists.
+    Err(SherpaOnnxError::ModelNotFound {
+        path: model_dir.join("*.onnx"),
+    })
 }
 
 /// Scan `models_dir` for valid Sherpa-ONNX model directories.
@@ -88,15 +92,15 @@ pub fn discover_models(models_dir: &Path) -> Vec<ModelInfo> {
 /// For SenseVoice: tokens.txt and at least one `.onnx` file.
 pub fn validate_model_dir(model_dir: &Path) -> Result<(), SherpaOnnxError> {
     if !model_dir.exists() {
-        return Err(SherpaOnnxError::ModelNotFound(
-            model_dir.display().to_string(),
-        ));
+        return Err(SherpaOnnxError::ModelNotFound {
+            path: model_dir.to_path_buf(),
+        });
     }
     for file in SENSEVOICE_REQUIRED_FILES {
         if !model_dir.join(file).exists() {
-            return Err(SherpaOnnxError::ModelNotFound(
-                model_dir.join(file).display().to_string(),
-            ));
+            return Err(SherpaOnnxError::ModelNotFound {
+                path: model_dir.join(file),
+            });
         }
     }
     // Also verify at least one .onnx file exists
