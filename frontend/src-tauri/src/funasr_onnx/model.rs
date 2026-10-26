@@ -106,50 +106,73 @@ impl FunasrModel {
     ) -> Result<(Vec<f32>, i32), FunasrError> {
         let t = feats_len as usize;
 
-        // Input "speech": shape (1, T, 560), float32
-        let speech =
-            ndarray::Array3::from_shape_vec((1, t, 560), features.to_vec()).map_err(|e| {
-                FunasrError::DecodeError {
-                    message: e.to_string(),
-                    source: Some(Box::new(e)),
-                }
-            })?;
-        let speech_tensor = TensorRef::from_array_view(speech.view())?;
+        // Input "speech": shape (1, T, 560), float32 — viewed in place, zero copy.
+        let speech = ndarray::ArrayView3::<f32>::from_shape((1, t, 560), features).map_err(|e| {
+            FunasrError::DecodeError {
+                message: format!("input feature shape mismatch: {e:?}"),
+                source: Some(Box::new(e)),
+            }
+        })?;
+        let speech_tensor = TensorRef::from_array_view(speech)?;
 
         // Input "speech_lengths": shape (1,), int32
         let lengths = ndarray::Array1::from_shape_vec(1, vec![feats_len]).map_err(|e| {
             FunasrError::DecodeError {
-                message: e.to_string(),
+                message: format!("speech_lengths shape mismatch: {e:?}"),
                 source: Some(Box::new(e)),
             }
         })?;
         let lengths_tensor = TensorRef::from_array_view(lengths.view())?;
 
-        // Run inference
-        let mut session_guard = self.session.lock().unwrap();
+        // Run inference. The guard is poison-tolerant (a panicked writer must not
+        // panic every subsequent reader) and is held for the minimum span the ort
+        // API allows: `Session::run` takes `&mut self` and the returned
+        // `SessionOutputs` borrows the session, so the guard necessarily spans
+        // run + extraction (verified against ort 2.0.0-rc.10).
+        let mut session_guard = lock_poison_tolerant(&self.session);
         let outputs = session_guard.run(inputs![
             "speech" => speech_tensor,
             "speech_lengths" => lengths_tensor,
         ])?;
 
         // Extract "logits" output: float32, shape (1, T, vocab_size)
-        let logits: Vec<f32> = outputs["logits"]
+        let logits: Vec<f32> = require_output(|name| outputs.get(name), "logits")?
             .try_extract_array()?
             .iter()
             .copied()
             .collect();
 
         // Extract "token_num" output: int32, shape (1,)
-        let token_num: i32 = *outputs["token_num"]
+        let token_num: i32 = *require_output(|name| outputs.get(name), "token_num")?
             .try_extract_array::<i32>()?
             .first()
             .ok_or_else(|| FunasrError::DecodeError {
-                message: "missing token_num output".into(),
+                message: "token_num output is empty".into(),
                 source: None,
             })?;
 
         Ok((logits, token_num))
     }
+}
+
+/// Locks `mutex`, recovering the inner value if a previous writer panicked and
+/// poisoned it. Inference state is self-contained per call, so recovery is safe
+/// and strictly better than panicking every subsequent reader.
+fn lock_poison_tolerant<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Looks up a required model output by name, returning a typed error that names
+/// the missing key instead of panicking (string-indexing the outputs map panics
+/// on a missing key).
+fn require_output<'v, F>(get: F, name: &str) -> Result<&'v ort::value::DynValue, FunasrError>
+where
+    F: FnOnce(&str) -> Option<&'v ort::value::DynValue>,
+{
+    get(name).ok_or_else(|| FunasrError::DecodeError {
+        message: format!("missing required model output '{name}'"),
+        source: None,
+    })
 }
 
 #[cfg(test)]
@@ -185,6 +208,57 @@ mod tests {
         let result = FunasrModel::new(&dir);
         assert!(result.is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hardware_profile_detect_returns_single_cached_instance() {
+        // T11 item 1 (verify-only): the GPU probe is already cached process-wide by the
+        // `OnceLock` in `audio/hardware_detector.rs:49` (`get_or_init` at :53), and
+        // `model.rs` calls `detect()` in exactly one place. Two calls must yield the
+        // same `&'static` instance — proving the probe runs at most once and that no
+        // second cache was introduced here.
+        let a = crate::audio::hardware_detector::HardwareProfile::detect();
+        let b = crate::audio::hardware_detector::HardwareProfile::detect();
+        assert!(
+            std::ptr::eq(a, b),
+            "detect() must return the same cached &'static HardwareProfile"
+        );
+    }
+
+    #[test]
+    fn missing_output_key_returns_err_not_panic() {
+        // T11 item 5: a missing output key must produce a typed Err (naming the key),
+        // never a panic. `catch_unwind` proves the lookup path is panic-free.
+        let getter = |_name: &str| -> Option<&'static ort::value::DynValue> { None };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            require_output(getter, "token_num")
+        }));
+        match result {
+            Ok(Err(FunasrError::DecodeError { message, .. })) => {
+                assert!(
+                    message.contains("token_num"),
+                    "error must name the missing key, got: {message}"
+                );
+            }
+            Ok(Ok(_)) => panic!("expected Err for a missing output key"),
+            Ok(Err(other)) => panic!("expected DecodeError, got: {other:?}"),
+            Err(_) => panic!("require_output must not panic on a missing output key"),
+        }
+    }
+
+    #[test]
+    fn lock_poison_tolerant_recovers_after_poison() {
+        // T11 item 6: a mutex poisoned by a panicked writer must be recovered via
+        // `into_inner()` instead of panicking the reader thread.
+        let mutex = std::sync::Arc::new(Mutex::new(41i32));
+        let poisoned = std::sync::Arc::clone(&mutex);
+        let handle = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("deliberate poison");
+        });
+        assert!(handle.join().is_err(), "writer thread panicked, poisoning the mutex");
+        let guard = lock_poison_tolerant(&mutex);
+        assert_eq!(*guard, 41, "inner value must be recovered from the poisoned mutex");
     }
 
     #[test]
