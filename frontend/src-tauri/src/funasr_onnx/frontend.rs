@@ -1,9 +1,10 @@
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use crate::funasr_onnx::FunasrError;
 use realfft::num_complex::Complex32;
-use realfft::RealFftPlanner;
+use realfft::{RealFftPlanner, RealToComplex};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -96,6 +97,24 @@ fn mel_filterbank() -> &'static Vec<Vec<f32>> {
 // FBank feature extraction
 // ---------------------------------------------------------------------------
 
+/// Number of times the FFT plan has been constructed (test observability).
+static FFT_PLAN_CONSTRUCTIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Process-wide forward-FFT plan for `FFT_SIZE`.
+///
+/// `RealFftPlanner` requires `&mut` only to *create* a plan; the resulting
+/// `Arc<dyn RealToComplex<f32>>` is immutable and `Send + Sync`, so the plan
+/// itself is what gets cached — one construction, shared across threads.
+/// Per-call scratch buffers stay call-local: they are cheap `Vec`s and
+/// sharing them would need a `Mutex`, serializing FFT across threads.
+fn fft_plan() -> &'static Arc<dyn RealToComplex<f32>> {
+    static PLAN: OnceLock<Arc<dyn RealToComplex<f32>>> = OnceLock::new();
+    PLAN.get_or_init(|| {
+        FFT_PLAN_CONSTRUCTIONS.fetch_add(1, Ordering::SeqCst);
+        RealFftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE)
+    })
+}
+
 /// Compute 80-dimensional log-mel filterbank energies from scaled PCM audio.
 ///
 /// `audio` is assumed to already be scaled by 32768.0.
@@ -108,11 +127,7 @@ fn compute_fbank(audio: &[f32]) -> Result<Vec<Vec<f32>>, FunasrError> {
     let fb = mel_filterbank();
     let n_bins = FFT_SIZE / 2 + 1; // 257
 
-    // Pre-allocate FFT buffers (reused across frames)
-    let mut planner = RealFftPlanner::new();
-    let fft = planner.plan_fft_forward(FFT_SIZE);
-    #[allow(unused_mut)]
-    let mut fft = fft;
+    let fft = fft_plan();
     let mut spectrum: Vec<Complex32> = fft.make_output_vec(); // length 257
     let mut indata = vec![0.0f32; FFT_SIZE];
 
@@ -192,7 +207,15 @@ fn apply_lfr(fbank: &[Vec<f32>]) -> Vec<Vec<f32>> {
     for i in 0..t_lfr {
         let start = i * LFR_N;
         if start + LFR_M > padded.len() {
-            // Not enough frames for a full output row — break early
+            // Not enough frames for a full output row — the remaining
+            // `t_lfr - i` nominal rows are dropped (documented invariant:
+            // trailing partial windows are discarded, never padded).
+            log::warn!(
+                "apply_lfr: dropping {} trailing frame row(s) ({} fbank frame(s) short of a full {}-frame window)",
+                t_lfr - i,
+                padded.len() - start,
+                LFR_M
+            );
             break;
         }
         let mut feat = Vec::with_capacity(FEAT_DIM);
@@ -317,16 +340,42 @@ fn parse_kaldi_cmvn(data: &[u8], path: &Path) -> Result<(Vec<f32>, Vec<f32>), Fu
 ///
 /// Each frame: `out[i] = (frame[i] + means[i]) * inv_stds[i]`
 /// where `means` are the **negative** means already (AddShift convention).
-fn apply_cmvn(feats: &[Vec<f32>], means: &[f32], inv_stds: &[f32]) -> Vec<Vec<f32>> {
+///
+/// Errors when `means`/`inv_stds` lengths or any frame length do not match
+/// `FEAT_DIM` — the previous silent `zip` truncation corrupted features.
+fn apply_cmvn(
+    feats: &[Vec<f32>],
+    means: &[f32],
+    inv_stds: &[f32],
+) -> Result<Vec<Vec<f32>>, FunasrError> {
+    if means.len() != FEAT_DIM || inv_stds.len() != FEAT_DIM {
+        return Err(FunasrError::DecodeError {
+            message: format!(
+                "CMVN length mismatch: expected {FEAT_DIM}, got means={} inv_stds={}",
+                means.len(),
+                inv_stds.len()
+            ),
+            source: None,
+        });
+    }
     feats
         .iter()
         .map(|frame| {
-            frame
+            if frame.len() != FEAT_DIM {
+                return Err(FunasrError::DecodeError {
+                    message: format!(
+                        "Feature frame length mismatch: expected {FEAT_DIM}, got {}",
+                        frame.len()
+                    ),
+                    source: None,
+                });
+            }
+            Ok(frame
                 .iter()
                 .zip(means.iter())
                 .zip(inv_stds.iter())
                 .map(|((&f, &m), &is)| (f + m) * is)
-                .collect::<Vec<f32>>()
+                .collect::<Vec<f32>>())
         })
         .collect()
 }
@@ -379,6 +428,18 @@ impl FunasrFrontend {
         // 1. Scale to match the int16-range convention used by the Python frontend
         let scaled: Vec<f32> = audio.iter().map(|&s| s * 32768.0).collect();
 
+        // Non-finite samples (NaN/Inf, or finite values that overflow to Inf
+        // when scaled) would poison every downstream feature and silently
+        // reach the ONNX session — reject them here.
+        if let Some(idx) = scaled.iter().position(|v| !v.is_finite()) {
+            return Err(FunasrError::DecodeError {
+                message: format!(
+                    "audio contains a non-finite sample at index {idx} (NaN/Inf after scaling)"
+                ),
+                source: None,
+            });
+        }
+
         // 2. Log-mel filterbank features
         let fbank = compute_fbank(&scaled)?;
 
@@ -392,7 +453,7 @@ impl FunasrFrontend {
         );
 
         // 4. CMVN normalisation
-        let cmvn = apply_cmvn(&lfr, &self.cmvn_means, &self.cmvn_inv_std);
+        let cmvn = apply_cmvn(&lfr, &self.cmvn_means, &self.cmvn_inv_std)?;
 
         // 5. Flatten
         let t_lfr = cmvn.len();
@@ -498,7 +559,9 @@ mod tests {
 
     #[test]
     fn test_apply_lfr_output_shape() {
-        // 14 fbank frames → padded = 17 frames → T_lfr = 2 (ceil(14/6)=2)
+        // 14 fbank frames → padded = 17 frames → nominal T_lfr = ceil(14/6) = 3,
+        // but the loop breaks at i=2 (start=12, 12+7=19 > padded.len()=17),
+        // so only 2 full rows are emitted.
         let n_frames = 14;
         let fb: Vec<Vec<f32>> = (0..n_frames).map(|_| vec![0.5f32; N_MELS]).collect();
         let result = apply_lfr(&fb);
@@ -533,7 +596,7 @@ mod tests {
             .collect();
         let means = vec![0.0_f32; FEAT_DIM];
         let inv_stds = vec![1.0_f32; FEAT_DIM];
-        let result = apply_cmvn(&feats, &means, &inv_stds);
+        let result = apply_cmvn(&feats, &means, &inv_stds).unwrap();
         assert_eq!(result.len(), n_frames);
         for (orig, processed) in feats.iter().zip(result.iter()) {
             for (&o, &p) in orig.iter().zip(processed.iter()) {
@@ -549,7 +612,7 @@ mod tests {
         let feats: Vec<Vec<f32>> = vec![vec![3.0_f32; FEAT_DIM]];
         let means = vec![1.0_f32; FEAT_DIM];
         let inv_stds = vec![2.0_f32; FEAT_DIM];
-        let result = apply_cmvn(&feats, &means, &inv_stds);
+        let result = apply_cmvn(&feats, &means, &inv_stds).unwrap();
         assert_eq!(result.len(), 1);
         for &v in &result[0] {
             assert!((v - 8.0).abs() < 1e-6); // (3 + 1) * 2 = 8
@@ -642,6 +705,70 @@ mod tests {
             }
             other => panic!("expected InvalidCmvnFile, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // T13: input-validation and planner-caching tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_cmvn_length_mismatch_returns_error() {
+        // means is one element shorter than the feature dim — the old code
+        // silently truncated via `zip`; the fixed code must return an error.
+        let feats: Vec<Vec<f32>> = vec![vec![1.0_f32; FEAT_DIM]];
+        let means = vec![0.0_f32; FEAT_DIM - 1];
+        let inv_stds = vec![1.0_f32; FEAT_DIM];
+        let result = apply_cmvn(&feats, &means, &inv_stds);
+        assert!(result.is_err(), "CMVN length mismatch must be an error, not silent truncation");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("mismatch") || msg.contains("length"), "error should name the problem: {msg}");
+    }
+
+    #[test]
+    fn test_process_rejects_nonfinite_audio() {
+        // Write a valid text-format CMVN file so FunasrFrontend::new succeeds.
+        let path = std::env::temp_dir().join("meetily-t13-cmvn.am");
+        std::fs::write(&path, make_full_cmvn_text()).expect("write temp cmvn");
+        let frontend = FunasrFrontend::new(&path).expect("construct frontend");
+
+        // 560 samples of sine with one NaN injected mid-stream.
+        let mut audio = generate_sine_wave(560, 440.0, 16000);
+        audio[300] = f32::NAN;
+        let result = frontend.process(&audio);
+        assert!(result.is_err(), "NaN audio must be rejected before reaching ONNX");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("non-finite") || msg.contains("NaN") || msg.contains("finite"),
+            "error should name non-finite input: {msg}"
+        );
+
+        // Same for +Inf.
+        let mut audio = generate_sine_wave(560, 440.0, 16000);
+        audio[100] = f32::INFINITY;
+        assert!(frontend.process(&audio).is_err(), "Inf audio must be rejected");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_fft_plan_constructed_once() {
+        // Two consecutive compute_fbank calls must reuse the cached FFT plan.
+        let audio_a = generate_sine_wave(560, 440.0, 16000);
+        let scaled_a: Vec<f32> = audio_a.iter().map(|&s| s * 32768.0).collect();
+        let first = compute_fbank(&scaled_a).expect("first compute_fbank");
+
+        let audio_b = generate_sine_wave(960, 880.0, 16000);
+        let scaled_b: Vec<f32> = audio_b.iter().map(|&s| s * 32768.0).collect();
+        let second = compute_fbank(&scaled_b).expect("second compute_fbank");
+
+        assert_eq!(
+            FFT_PLAN_CONSTRUCTIONS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "FFT plan must be constructed exactly once across calls"
+        );
+        // Sanity: both calls produced well-formed frames.
+        assert_eq!(first.len(), 2);
+        assert!(!second.is_empty());
     }
 
     #[test]
