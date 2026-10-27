@@ -12,7 +12,7 @@ use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, RwLock};
 use crate::audio::transcription::TranscriptionProvider;
 use crate::audio::transcription::SherpaOnnxProvider;
 use crate::funasr_onnx::FunasrEngine;
@@ -31,11 +31,65 @@ static IMPORT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 /// Global flag to signal cancellation
 static IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
 
-/// Global FunASR engine instance (initialized once, reused across import jobs)
-static IMPORT_FUNASR_ENGINE: OnceLock<Arc<FunasrEngine>> = OnceLock::new();
+/// Global FunASR engine instance (reused across import jobs; cleared after each
+/// job so a deleted/changed model directory is never served from a stale cache)
+static IMPORT_FUNASR_ENGINE: RwLock<Option<Arc<FunasrEngine>>> = RwLock::new(None);
 
-/// Global Sherpa-ONNX engine instance (initialized once, reused across import jobs)
-static SHERPA_ONNX_ENGINE: OnceLock<Arc<SherpaOnnxProvider>> = OnceLock::new();
+/// Global Sherpa-ONNX engine instance (reused across import jobs; cleared after
+/// each job so a deleted/changed model directory is never served from a stale cache)
+static SHERPA_ONNX_ENGINE: RwLock<Option<Arc<SherpaOnnxProvider>>> = RwLock::new(None);
+
+/// Which transcription engine an import job should use.
+///
+/// Parsed once at the `start_import` boundary so the rest of the pipeline
+/// matches on enum variants instead of re-comparing raw strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportProvider {
+    Whisper,
+    Parakeet,
+    Funasr,
+    SherpaOnnx,
+}
+
+impl TryFrom<&str> for ImportProvider {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "whisper" | "localWhisper" => Ok(ImportProvider::Whisper),
+            "parakeet" => Ok(ImportProvider::Parakeet),
+            "funasr" => Ok(ImportProvider::Funasr),
+            "sherpa-onnx" => Ok(ImportProvider::SherpaOnnx),
+            other => Err(format!(
+                "Unsupported import provider '{}'. Supported providers: whisper, localWhisper, parakeet, funasr, sherpa-onnx",
+                other
+            )),
+        }
+    }
+}
+
+/// Resolve the optional provider string from the frontend into a typed
+/// provider. `None` defaults to Whisper, matching the historical behavior.
+fn resolve_import_provider(provider: Option<&str>) -> Result<ImportProvider, String> {
+    match provider {
+        None => Ok(ImportProvider::Whisper),
+        Some(raw) => ImportProvider::try_from(raw),
+    }
+}
+
+/// Drop the cached engine behind `cache` so the next job re-initializes it.
+fn clear_cache<T>(cache: &RwLock<Option<T>>) {
+    *cache.write().unwrap() = None;
+}
+
+/// Invalidate all cached import engines.
+///
+/// Called after every import job (success, failure, or cancellation) so a
+/// model deleted or replaced between jobs is never served from a stale cache.
+pub(crate) fn invalidate_engine_cache() {
+    clear_cache(&IMPORT_FUNASR_ENGINE);
+    clear_cache(&SHERPA_ONNX_ENGINE);
+}
 
 /// RAII guard for IMPORT_IN_PROGRESS flag
 /// Ensures flag is cleared even if import panics or returns early
@@ -271,16 +325,23 @@ pub async fn start_import<R: Runtime>(
     // Reset cancellation flag
     IMPORT_CANCELLED.store(false, Ordering::SeqCst);
 
-    let use_parakeet = provider.as_deref() == Some("parakeet");
-    let use_funasr = provider.as_deref() == Some("funasr");
-    let use_sherpa_onnx = provider.as_deref() == Some("sherpa-onnx");
-    let result = run_import(app.clone(), source_path, title, language, model, provider).await;
+    let import_provider =
+        resolve_import_provider(provider.as_deref()).map_err(|e| anyhow!(e))?;
+    let result = run_import(app.clone(), source_path, title, language, model, import_provider).await;
 
     // Unload the engine after the batch job (success, failure, or cancellation)
-    // FunASR/Sherpa-ONNX uses OnceLock (persistent), no unload needed
-    if !use_funasr && !use_sherpa_onnx {
-        super::common::unload_engine_after_batch(use_parakeet).await;
+    // FunASR/Sherpa-ONNX engines are persistent, no unload needed
+    if !matches!(
+        import_provider,
+        ImportProvider::Funasr | ImportProvider::SherpaOnnx
+    ) {
+        super::common::unload_engine_after_batch(matches!(import_provider, ImportProvider::Parakeet))
+            .await;
     }
+
+    // Drop cached FunASR/Sherpa-ONNX engines so a model deleted or replaced
+    // between jobs is never served from a stale cache
+    invalidate_engine_cache();
 
     // Guard will automatically clear flag on drop
     // No need for manual: IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -317,7 +378,7 @@ async fn run_import<R: Runtime>(
     title: String,
     language: Option<String>,
     model: Option<String>,
-    provider: Option<String>,
+    provider: ImportProvider,
 ) -> Result<ImportResult> {
     let source = PathBuf::from(&source_path);
 
@@ -331,10 +392,9 @@ async fn run_import<R: Runtime>(
         title, source_path, language, model, provider
     );
 
-    // Determine which provider to use (default to whisper)
-    let use_parakeet = provider.as_deref() == Some("parakeet");
-    let use_funasr = provider.as_deref() == Some("funasr");
-    let use_sherpa_onnx = provider.as_deref() == Some("sherpa-onnx");
+    let use_parakeet = matches!(provider, ImportProvider::Parakeet);
+    let use_funasr = matches!(provider, ImportProvider::Funasr);
+    let use_sherpa_onnx = matches!(provider, ImportProvider::SherpaOnnx);
 
     emit_progress(&app, "copying", 5, "Creating meeting folder...");
 
@@ -539,7 +599,7 @@ async fn run_import<R: Runtime>(
     } else {
         None
     };
-    let _sherpa_onnx_engine = if use_sherpa_onnx && total_segments > 0 {
+    let sherpa_onnx_engine = if use_sherpa_onnx && total_segments > 0 {
         info!("Initializing Sherpa-ONNX engine...");
         Some(get_or_init_sherpa_onnx(&app, model.as_deref()).await?)
     } else {
@@ -627,8 +687,9 @@ async fn run_import<R: Runtime>(
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
             (text, 0.0f32)
         } else if use_sherpa_onnx {
-            let sherpa_onnx = get_or_init_sherpa_onnx(&app, model.as_deref()).await
-                .map_err(|e| anyhow!("Sherpa-ONNX engine init failed: {}", e))?;
+            let sherpa_onnx = sherpa_onnx_engine
+                .as_ref()
+                .expect("sherpa engine initialised for sherpa-onnx provider");
             let result = sherpa_onnx.transcribe(segment.samples.clone(), None).await
                 .map_err(|e| anyhow!("Sherpa-ONNX transcription failed on segment {}: {}", i, e))?;
             let conf = result.confidence.unwrap_or(0.0);
@@ -904,11 +965,11 @@ async fn get_or_init_parakeet<R: Runtime>(
     }
 }
 
-/// Get or initialize the FunASR engine (OnceLock, initialized once globally)
+/// Get or initialize the FunASR engine (cached globally, invalidated between jobs)
 async fn get_or_init_funasr<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Arc<FunasrEngine>> {
-    if let Some(engine) = IMPORT_FUNASR_ENGINE.get() {
+    if let Some(engine) = IMPORT_FUNASR_ENGINE.read().unwrap().as_ref() {
         return Ok(engine.clone());
     }
 
@@ -925,19 +986,18 @@ async fn get_or_init_funasr<R: Runtime>(
         .map_err(|e| anyhow!("Failed to initialize FunASR engine: {}", e))?;
     let engine = Arc::new(engine);
 
-    IMPORT_FUNASR_ENGINE.set(engine.clone())
-        .map_err(|_| anyhow!("FunASR engine already initialized"))?;
+    *IMPORT_FUNASR_ENGINE.write().unwrap() = Some(engine.clone());
 
     info!("FunASR engine initialized successfully");
     Ok(engine)
 }
 
-/// Get or initialize the Sherpa-ONNX engine (OnceLock, initialized once globally)
+/// Get or initialize the Sherpa-ONNX engine (cached globally, invalidated between jobs)
 async fn get_or_init_sherpa_onnx<R: Runtime>(
     app: &AppHandle<R>,
     model: Option<&str>,
 ) -> Result<Arc<SherpaOnnxProvider>> {
-    if let Some(engine) = SHERPA_ONNX_ENGINE.get() {
+    if let Some(engine) = SHERPA_ONNX_ENGINE.read().unwrap().as_ref() {
         return Ok(engine.clone());
     }
 
@@ -955,8 +1015,7 @@ async fn get_or_init_sherpa_onnx<R: Runtime>(
         .map_err(|e| anyhow!("Failed to initialize Sherpa-ONNX engine: {}", e))?;
     let provider = Arc::new(provider);
 
-    SHERPA_ONNX_ENGINE.set(provider.clone())
-        .map_err(|_| anyhow!("Sherpa-ONNX engine already initialized"))?;
+    *SHERPA_ONNX_ENGINE.write().unwrap() = Some(provider.clone());
 
     info!("Sherpa-ONNX engine initialized successfully");
     Ok(provider)
@@ -1135,6 +1194,65 @@ pub async fn is_import_in_progress_command() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_import_provider_try_from_accepted_values() {
+        assert_eq!(
+            ImportProvider::try_from("whisper"),
+            Ok(ImportProvider::Whisper)
+        );
+        assert_eq!(
+            ImportProvider::try_from("localWhisper"),
+            Ok(ImportProvider::Whisper)
+        );
+        assert_eq!(
+            ImportProvider::try_from("parakeet"),
+            Ok(ImportProvider::Parakeet)
+        );
+        assert_eq!(
+            ImportProvider::try_from("funasr"),
+            Ok(ImportProvider::Funasr)
+        );
+        assert_eq!(
+            ImportProvider::try_from("sherpa-onnx"),
+            Ok(ImportProvider::SherpaOnnx)
+        );
+    }
+
+    #[test]
+    fn test_import_provider_try_from_rejects_unknown() {
+        let err = ImportProvider::try_from("nonsense").unwrap_err();
+        assert!(err.contains("nonsense"));
+        assert!(err.contains("sherpa-onnx"));
+    }
+
+    #[test]
+    fn test_resolve_import_provider_defaults_to_whisper() {
+        assert_eq!(
+            resolve_import_provider(None),
+            Ok(ImportProvider::Whisper)
+        );
+        assert_eq!(
+            resolve_import_provider(Some("parakeet")),
+            Ok(ImportProvider::Parakeet)
+        );
+        assert!(resolve_import_provider(Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn test_clear_cache_drops_cached_value() {
+        let cache: RwLock<Option<String>> = RwLock::new(Some("engine".to_string()));
+        clear_cache(&cache);
+        assert!(cache.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_invalidate_engine_cache_clears_both_statics() {
+        invalidate_engine_cache();
+
+        assert!(IMPORT_FUNASR_ENGINE.read().unwrap().is_none());
+        assert!(SHERPA_ONNX_ENGINE.read().unwrap().is_none());
+    }
 
     #[test]
     fn test_audio_extensions() {
