@@ -4,8 +4,76 @@
 
 use super::provider::TranscriptionProvider;
 use log::{info, warn};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use tauri::{AppHandle, Manager, Runtime};
+
+// ============================================================================
+// LOCK HELPERS
+// ============================================================================
+
+/// Lock a mutex, recovering from poisoning instead of panicking.
+///
+/// A poisoned mutex still holds a valid inner value — only the poison flag
+/// is set — so the guard is recovered via `into_inner()` and the recovery
+/// is logged once.
+fn lock_unpoison<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    match m.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("Recovered from a poisoned lock in the transcription engine");
+            poisoned.into_inner()
+        }
+    }
+}
+
+// ============================================================================
+// CONFIG RESOLUTION (single fetch + single fallback)
+// ============================================================================
+
+/// Apply the transcript-config fallback to a fetched config result.
+///
+/// Pure seam for tests: takes the fetch result as an argument so no
+/// `AppHandle` (or database) is needed. This is the ONLY place in this
+/// module that contains the "default to parakeet" fallback:
+/// - `Ok(Some(config))` → use the saved config as-is;
+/// - `Ok(None)` → default to the parakeet provider + default model;
+/// - `Err(e)` → warn once and use the same default.
+fn resolve_config_from_fetch(
+    fetched: Result<Option<crate::api::api::TranscriptConfig>, String>,
+) -> crate::api::api::TranscriptConfig {
+    let config = match fetched {
+        Ok(Some(config)) => {
+            info!(
+                "📝 Found transcript config - provider: {}, model: {}",
+                config.provider, config.model
+            );
+            return config;
+        }
+        Ok(None) => {
+            info!("📝 No transcript config found, defaulting to parakeet");
+        }
+        Err(e) => {
+            warn!(
+                "⚠️ Failed to get transcript config: {}, defaulting to parakeet",
+                e
+            );
+        }
+    };
+    crate::api::api::TranscriptConfig {
+        provider: "parakeet".to_string(),
+        model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+        api_key: None,
+    }
+}
+
+/// Fetch the transcript configuration and apply the fallback exactly once.
+async fn resolve_transcription_config<R: Runtime>(
+    app: &AppHandle<R>,
+) -> crate::api::api::TranscriptConfig {
+    let fetched =
+        crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None).await;
+    resolve_config_from_fetch(fetched)
+}
 
 // ============================================================================
 // TRANSCRIPTION ENGINE ENUM
@@ -56,37 +124,7 @@ pub async fn validate_transcription_model_ready<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<(), String> {
     // Check transcript configuration to determine which engine to validate
-    let config =
-        match crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None)
-            .await
-        {
-            Ok(Some(config)) => {
-                info!(
-                    "📝 Found transcript config - provider: {}, model: {}",
-                    config.provider, config.model
-                );
-                config
-            }
-            Ok(None) => {
-                info!("📝 No transcript config found, defaulting to parakeet");
-                crate::api::api::TranscriptConfig {
-                    provider: "parakeet".to_string(),
-                    model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
-                    api_key: None,
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "⚠️ Failed to get transcript config: {}, defaulting to parakeet",
-                    e
-                );
-                crate::api::api::TranscriptConfig {
-                    provider: "parakeet".to_string(),
-                    model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
-                    api_key: None,
-                }
-            }
-        };
+    let config = resolve_transcription_config(app).await;
 
     // Validate based on provider
     match config.provider.as_str() {
@@ -158,13 +196,25 @@ pub async fn validate_transcription_model_ready<R: Runtime>(
                 .join("models")
                 .join("funasr")
                 .join(model_name);
-            if !model_dir.join("model.onnx").exists() {
+            if !model_dir.exists() {
                 return Err(format!(
                     "FunASR model not found at {}. Please place model.onnx, tokens.json, and am.mvn in this directory.",
                     model_dir.display()
                 ));
             }
-            info!("✅ FunASR model directory found at {}", model_dir.display());
+            // Load the model for real: an existence-only check passes corrupt
+            // or truncated models, so construct the provider (which builds the
+            // ONNX session) on the blocking thread pool.
+            let dir = model_dir.clone();
+            let loaded = tokio::task::spawn_blocking(move || {
+                crate::audio::transcription::FunasrProvider::new(&dir)
+            })
+            .await
+            .map_err(|e| format!("FunASR model validation task failed: {}", e))?;
+            loaded
+                .map(|_| ())
+                .map_err(|e| format!("FunASR model validation failed: {}", e))?;
+            info!("✅ FunASR model validated at {}", model_dir.display());
             Ok(())
         }
         "sherpa-onnx" => {
@@ -188,10 +238,20 @@ pub async fn validate_transcription_model_ready<R: Runtime>(
                     model_dir.display()
                 ));
             }
-            crate::sherpa_onnx::model::validate_model_dir(&model_dir)
+            // Load the model for real: structure-only validation passes
+            // corrupt models, so construct the provider (which builds the
+            // recognizer) on the blocking thread pool.
+            let dir = model_dir.clone();
+            let loaded = tokio::task::spawn_blocking(move || {
+                crate::audio::transcription::SherpaOnnxProvider::new(&dir)
+            })
+            .await
+            .map_err(|e| format!("Sherpa-ONNX model validation task failed: {}", e))?;
+            loaded
+                .map(|_| ())
                 .map_err(|e| format!("Sherpa-ONNX model validation failed: {}", e))?;
             info!(
-                "✅ Sherpa-ONNX model directory found at {}",
+                "✅ Sherpa-ONNX model validated at {}",
                 model_dir.display()
             );
             Ok(())
@@ -213,38 +273,8 @@ pub async fn validate_transcription_model_ready<R: Runtime>(
 pub async fn get_or_init_transcription_engine<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<TranscriptionEngine, String> {
-    // Get provider configuration from API
-    let config =
-        match crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None)
-            .await
-        {
-            Ok(Some(config)) => {
-                info!(
-                    "📝 Transcript config - provider: {}, model: {}",
-                    config.provider, config.model
-                );
-                config
-            }
-            Ok(None) => {
-                info!("📝 No transcript config found, defaulting to parakeet");
-                crate::api::api::TranscriptConfig {
-                    provider: "parakeet".to_string(),
-                    model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
-                    api_key: None,
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "⚠️ Failed to get transcript config: {}, defaulting to parakeet",
-                    e
-                );
-                crate::api::api::TranscriptConfig {
-                    provider: "parakeet".to_string(),
-                    model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
-                    api_key: None,
-                }
-            }
-        };
+    // Get provider configuration from API (single fetch + single fallback)
+    let config = resolve_transcription_config(app).await;
 
     // Initialize the appropriate engine based on provider
     match config.provider.as_str() {
@@ -253,9 +283,8 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
 
             // Get Parakeet engine
             let engine = {
-                let guard = crate::parakeet_engine::commands::PARAKEET_ENGINE
-                    .lock()
-                    .unwrap();
+                let guard =
+                    lock_unpoison(&crate::parakeet_engine::commands::PARAKEET_ENGINE);
                 guard.as_ref().cloned()
             };
 
@@ -328,9 +357,8 @@ pub async fn get_or_init_whisper<R: Runtime>(
 ) -> Result<Arc<crate::whisper_engine::WhisperEngine>, String> {
     // Check if engine already exists and has a model loaded
     let existing_engine = {
-        let engine_guard = crate::whisper_engine::commands::WHISPER_ENGINE
-            .lock()
-            .unwrap();
+        let engine_guard =
+            lock_unpoison(&crate::whisper_engine::commands::WHISPER_ENGINE);
         engine_guard.as_ref().cloned()
     };
 
@@ -342,33 +370,13 @@ pub async fn get_or_init_whisper<R: Runtime>(
                 .await
                 .unwrap_or_else(|| "unknown".to_string());
 
-            // NEW: Check if loaded model matches saved config
-            let configured_model = match crate::api::api::api_get_transcript_config(
-                app.clone(),
-                app.clone().state(),
-                None,
-            )
-            .await
+            // Check if loaded model matches saved config (single fetch + fallback)
+            let config = resolve_transcription_config(app).await;
+            let configured_model = if config.provider == "localWhisper" && !config.model.is_empty()
             {
-                Ok(Some(config)) => {
-                    info!(
-                        "📝 Saved transcript config - provider: {}, model: {}",
-                        config.provider, config.model
-                    );
-                    if config.provider == "localWhisper" && !config.model.is_empty() {
-                        Some(config.model)
-                    } else {
-                        None
-                    }
-                }
-                Ok(None) => {
-                    info!("📝 No transcript config found in database");
-                    None
-                }
-                Err(e) => {
-                    warn!("⚠️ Failed to get transcript config: {}", e);
-                    None
-                }
+                Some(config.model)
+            } else {
+                None
             };
 
             // If loaded model matches config, reuse it
@@ -412,51 +420,24 @@ pub async fn get_or_init_whisper<R: Runtime>(
 
     // Get the engine reference
     let engine = {
-        let engine_guard = crate::whisper_engine::commands::WHISPER_ENGINE
-            .lock()
-            .unwrap();
+        let engine_guard =
+            lock_unpoison(&crate::whisper_engine::commands::WHISPER_ENGINE);
         engine_guard
             .as_ref()
             .cloned()
             .ok_or("Failed to get initialized engine")?
     };
 
-    // Get model configuration from API
-    let model_to_load = match crate::api::api::api_get_transcript_config(
-        app.clone(),
-        app.clone().state(),
-        None,
-    )
-    .await
-    {
-        Ok(Some(config)) => {
-            info!(
-                "Got transcript config from API - provider: {}, model: {}",
-                config.provider, config.model
-            );
-            if config.provider == "localWhisper" {
-                info!("Using model from API config: {}", config.model);
-                config.model
-            } else {
-                // Non-Whisper provider (e.g., parakeet) - this function shouldn't be called
-                return Err(format!(
-                        "Cannot initialize Whisper engine: Config uses '{}' provider. This is a bug in the transcription task initialization.",
-                        config.provider
-                    ));
-            }
-        }
-        Ok(None) => {
-            info!("No transcript config found in API, falling back to 'small'");
-            "small".to_string()
-        }
-        Err(e) => {
-            warn!(
-                "Failed to get transcript config from API: {}, falling back to 'small'",
-                e
-            );
-            "small".to_string()
-        }
-    };
+    // Get model configuration from API (single fetch + fallback)
+    let config = resolve_transcription_config(app).await;
+    if config.provider != "localWhisper" {
+        // Non-Whisper provider (e.g., parakeet) - this function shouldn't be called
+        return Err(format!(
+            "Cannot initialize Whisper engine: Config uses '{}' provider. This is a bug in the transcription task initialization.",
+            config.provider
+        ));
+    }
+    let model_to_load = config.model;
 
     info!("Selected model to load: {}", model_to_load);
 
@@ -544,4 +525,60 @@ pub async fn get_or_init_whisper<R: Runtime>(
     }
 
     Ok(engine)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_config_defaults_on_none() {
+        let cfg = resolve_config_from_fetch(Ok(None));
+        assert_eq!(cfg.provider, "parakeet");
+        assert_eq!(cfg.model, crate::config::DEFAULT_PARAKEET_MODEL);
+        assert!(cfg.api_key.is_none());
+    }
+
+    #[test]
+    fn test_resolve_config_defaults_on_err() {
+        let cfg = resolve_config_from_fetch(Err("database unavailable".to_string()));
+        assert_eq!(cfg.provider, "parakeet");
+        assert_eq!(cfg.model, crate::config::DEFAULT_PARAKEET_MODEL);
+        assert!(cfg.api_key.is_none());
+    }
+
+    #[test]
+    fn test_resolve_config_uses_fetched_config() {
+        let cfg = resolve_config_from_fetch(Ok(Some(crate::api::api::TranscriptConfig {
+            provider: "funasr".to_string(),
+            model: "paraformer-large".to_string(),
+            api_key: None,
+        })));
+        assert_eq!(cfg.provider, "funasr");
+        assert_eq!(cfg.model, "paraformer-large");
+    }
+
+    #[test]
+    fn test_lock_unpoison_recovers_from_poisoned_mutex() {
+        let mutex = Mutex::new(41usize);
+        *mutex.lock().expect("setup lock") += 1; // value = 42
+
+        // Poison the mutex by panicking while holding the lock.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mutex.lock().expect("poisoning lock");
+            panic!("intentional poison");
+        }));
+        assert!(result.is_err(), "the inner panic must poison the mutex");
+
+        // lock_unpoison must recover the value instead of panicking.
+        let value = *lock_unpoison(&mutex);
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn test_lock_unpoison_returns_guard_on_unpoisoned_mutex() {
+        let mutex = Mutex::new("intact".to_string());
+        let guard = lock_unpoison(&mutex);
+        assert_eq!(*guard, "intact");
+    }
 }
