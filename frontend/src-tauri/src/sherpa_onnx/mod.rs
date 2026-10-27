@@ -1,7 +1,8 @@
 //! Sherpa-ONNX transcription module.
 //!
 //! Provides SenseVoice model support via the sherpa-onnx Rust crate.
-//! GPU acceleration is auto-detected at runtime by sherpa-onnx.
+//! The recognizer is configured with the CPU execution provider; GPU
+//! acceleration is not enabled in this build.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -41,6 +42,11 @@ pub enum SherpaOnnxError {
     },
     /// Empty audio input provided
     EmptyAudio,
+    /// Sample rate is zero or does not fit in the `i32` the sherpa-onnx API takes
+    InvalidSampleRate {
+        /// The rejected sample rate
+        sample_rate: u32,
+    },
 }
 
 impl fmt::Display for SherpaOnnxError {
@@ -62,6 +68,9 @@ impl fmt::Display for SherpaOnnxError {
                 write!(f, "Invalid model directory {}: {}", path.display(), reason)
             }
             SherpaOnnxError::EmptyAudio => write!(f, "Empty audio input"),
+            SherpaOnnxError::InvalidSampleRate { sample_rate } => {
+                write!(f, "Invalid sample rate: {}", sample_rate)
+            }
         }
     }
 }

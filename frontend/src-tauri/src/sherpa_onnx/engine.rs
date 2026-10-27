@@ -1,7 +1,8 @@
 //! Sherpa-ONNX transcription engine.
 //!
 //! Wraps the sherpa-onnx [`OfflineRecognizer`] for SenseVoice model inference.
-//! GPU acceleration is auto-detected by sherpa-onnx at runtime.
+//! The recognizer is configured with the CPU execution provider; GPU
+//! acceleration is not enabled in this build.
 
 use std::path::Path;
 
@@ -15,6 +16,7 @@ use crate::sherpa_onnx::SherpaOnnxError;
 /// Sherpa-ONNX transcription engine wrapping [`OfflineRecognizer`].
 pub struct SherpaOnnxEngine {
     recognizer: OfflineRecognizer,
+    model_name: Option<String>,
 }
 
 impl std::fmt::Debug for SherpaOnnxEngine {
@@ -42,22 +44,27 @@ impl SherpaOnnxEngine {
             language: Some("auto".into()),
             use_itn: true,
         };
-        config.model_config.tokens = Some(
-            model_dir.join("tokens.txt").to_string_lossy().into_owned(),
-        );
+        let tokens_path = model_dir.join("tokens.txt");
+        config.model_config.tokens = Some(tokens_path.to_string_lossy().into_owned());
         config.model_config.num_threads = 4;
         config.model_config.provider = Some("cpu".into());
 
         // Create recognizer
         let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
             SherpaOnnxError::SherpaOnnx {
-                message: "Failed to create sherpa-onnx OfflineRecognizer \
-                          — model files may be invalid or incompatible"
-                    .into(),
+                message: recognizer_create_failure_message(&model_path, &tokens_path),
             }
         })?;
 
-        Ok(Self { recognizer })
+        Ok(Self {
+            recognizer,
+            model_name: resolve_model_name(model_dir),
+        })
+    }
+
+    /// The resolved model directory name, when the engine was constructed.
+    pub fn current_model(&self) -> Option<String> {
+        self.model_name.clone()
     }
 
     /// Transcribe audio samples using the loaded SenseVoice model.
@@ -69,12 +76,14 @@ impl SherpaOnnxEngine {
         samples: &[f32],
         sample_rate: u32,
     ) -> Result<String, SherpaOnnxError> {
-        if samples.is_empty() {
-            return Err(SherpaOnnxError::EmptyAudio);
-        }
+        let sample_rate = validate_transcribe_inputs(samples, sample_rate)?;
 
+        // A fresh stream per call is required by the sherpa-onnx API: offline
+        // streams expose no reset/flush (offline_asr.rs offers only create_stream,
+        // accept_waveform, decode, get_result), so reuse would bleed audio
+        // between calls.
         let stream = self.recognizer.create_stream();
-        stream.accept_waveform(sample_rate as i32, samples);
+        stream.accept_waveform(sample_rate, samples);
         self.recognizer.decode(&stream);
 
         let result = stream.get_result().ok_or_else(|| {
@@ -85,6 +94,37 @@ impl SherpaOnnxEngine {
 
         Ok(result.text)
     }
+}
+
+/// Validate transcription inputs and convert the sample rate for the
+/// sherpa-onnx API, which takes an `i32`.
+fn validate_transcribe_inputs(
+    samples: &[f32],
+    sample_rate: u32,
+) -> Result<i32, SherpaOnnxError> {
+    if samples.is_empty() {
+        return Err(SherpaOnnxError::EmptyAudio);
+    }
+    if sample_rate == 0 {
+        return Err(SherpaOnnxError::InvalidSampleRate { sample_rate });
+    }
+    i32::try_from(sample_rate).map_err(|_| SherpaOnnxError::InvalidSampleRate { sample_rate })
+}
+
+/// Build the enriched failure message for `OfflineRecognizer::create`.
+fn recognizer_create_failure_message(model_path: &Path, tokens_path: &Path) -> String {
+    format!(
+        "failed to create OfflineRecognizer (model={}, tokens={}, provider=cpu, \
+         num_threads=4): recognizer creation returned None — model files may be \
+         invalid or incompatible",
+        model_path.display(),
+        tokens_path.display()
+    )
+}
+
+/// Resolve the model directory name for reporting.
+fn resolve_model_name(dir: &Path) -> Option<String> {
+    dir.file_name().and_then(|n| n.to_str()).map(str::to_string)
 }
 
 #[cfg(test)]
@@ -171,5 +211,73 @@ mod tests {
             "Display should mention Empty audio: {}",
             msg
         );
+    }
+
+    // T16: the transcribe-input validator is the honest testable path — a real
+    // OfflineRecognizer cannot be constructed in CI without valid ONNX files.
+    #[test]
+    fn test_validate_transcribe_inputs_rejects_empty() {
+        let err = validate_transcribe_inputs(&[], 16000).unwrap_err();
+        assert!(matches!(err, SherpaOnnxError::EmptyAudio));
+    }
+
+    #[test]
+    fn test_validate_transcribe_inputs_rejects_zero_sample_rate() {
+        let err = validate_transcribe_inputs(&[0.0], 0).unwrap_err();
+        assert!(
+            matches!(err, SherpaOnnxError::InvalidSampleRate { sample_rate: 0 }),
+            "zero sample rate must be rejected, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_transcribe_inputs_rejects_out_of_range_sample_rate() {
+        // u32::MAX does not fit in i32 — must be rejected, never truncated by `as`.
+        let err = validate_transcribe_inputs(&[0.0], u32::MAX).unwrap_err();
+        assert!(
+            matches!(err, SherpaOnnxError::InvalidSampleRate { sample_rate: u32::MAX }),
+            "out-of-range sample rate must be rejected, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_transcribe_inputs_accepts_normal_rate() {
+        assert_eq!(validate_transcribe_inputs(&[0.0, 1.0], 16000).unwrap(), 16000);
+    }
+
+    #[test]
+    fn test_recognizer_create_failure_message_names_model_and_tokens() {
+        let msg = recognizer_create_failure_message(
+            Path::new("/models/sense-voice/model.int8.onnx"),
+            Path::new("/models/sense-voice/tokens.txt"),
+        );
+        assert!(
+            msg.contains("model.int8.onnx"),
+            "message should name the model path: {msg}"
+        );
+        assert!(
+            msg.contains("tokens.txt"),
+            "message should name the tokens path: {msg}"
+        );
+        assert!(msg.contains("cpu"), "message should name the provider: {msg}");
+    }
+
+    #[test]
+    fn test_resolve_model_name_returns_dir_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let expected = dir
+            .path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap()
+            .to_string();
+        assert_eq!(resolve_model_name(dir.path()), Some(expected));
+    }
+
+    #[test]
+    fn test_resolve_model_name_none_for_root() {
+        assert_eq!(resolve_model_name(Path::new("/")), None);
     }
 }
