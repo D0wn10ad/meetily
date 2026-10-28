@@ -373,7 +373,7 @@ async fn run_retranscription<R: Runtime>(
     } else {
         None
     };
-    let _sherpa_onnx_engine = if use_sherpa_onnx {
+    let sherpa_onnx_engine = if use_sherpa_onnx {
         info!("Initializing Sherpa-ONNX engine...");
         Some(get_or_init_sherpa_onnx(&app, model.as_deref()).await?)
     } else {
@@ -456,15 +456,14 @@ async fn run_retranscription<R: Runtime>(
             .map_err(|e| anyhow!("FunASR task panicked: {}", e))??;
             (text, 0.9f32)
         } else if use_parakeet {
-            let engine = parakeet_engine.as_ref().unwrap();
+            let engine = parakeet_engine.as_ref().unwrap().clone();
             let text = engine
                 .transcribe_audio(segment.samples.clone())
                 .await
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
             (text, 0.0f32)
         } else if use_sherpa_onnx {
-            let sherpa_onnx = get_or_init_sherpa_onnx(&app, model.as_deref()).await
-                .map_err(|e| anyhow!("Sherpa-ONNX engine init failed: {}", e))?;
+            let sherpa_onnx = sherpa_onnx_engine.as_ref().unwrap().clone();
             let result = sherpa_onnx.transcribe(segment.samples.clone(), None).await
                 .map_err(|e| anyhow!("Sherpa-ONNX transcription failed on segment {}: {}", i, e))?;
             let conf = result.confidence.unwrap_or(0.0);
@@ -649,7 +648,10 @@ async fn get_or_init_whisper<R: Runtime>(
     use crate::whisper_engine::commands::WHISPER_ENGINE;
 
     let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| {
+            warn!("WHISPER_ENGINE lock poisoned; recovering the inner value");
+            e.into_inner()
+        });
         guard.as_ref().cloned()
     };
 
@@ -869,7 +871,24 @@ async fn get_configured_parakeet_model<R: Runtime>(app: &AppHandle<R>) -> Result
     }
 }
 
-/// Get or initialize the FunASR engine (OnceLock, initialized once globally)
+/// Initialize `slot` with the engine built by `construct`, storing exactly once.
+///
+/// Concurrent callers that race on an empty slot may both run `construct`,
+/// but only the first result is stored; every caller receives the same `Arc`
+/// and `Ok` — the loser's engine is dropped. A failed `construct` leaves the
+/// slot empty so the next caller retries.
+fn init_engine_cache<E, TErr>(
+    slot: &OnceLock<Arc<E>>,
+    construct: impl FnOnce() -> Result<E, TErr>,
+) -> Result<Arc<E>, TErr> {
+    if let Some(engine) = slot.get() {
+        return Ok(engine.clone());
+    }
+    let engine = Arc::new(construct()?);
+    Ok(slot.get_or_init(|| engine.clone()).clone())
+}
+
+/// Get or initialize the FunASR engine (cached globally, race-free via get_or_init)
 async fn get_or_init_funasr<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Arc<FunasrEngine>> {
@@ -886,18 +905,16 @@ async fn get_or_init_funasr<R: Runtime>(
         model_dir.display()
     );
 
-    let engine = FunasrEngine::new(&model_dir)
-        .map_err(|e| anyhow!("Failed to initialize FunASR engine: {}", e))?;
-    let engine = Arc::new(engine);
-
-    FUNASR_ENGINE.set(engine.clone())
-        .map_err(|_| anyhow!("FunASR engine already initialized"))?;
+    let engine = init_engine_cache(&FUNASR_ENGINE, || {
+        FunasrEngine::new(&model_dir)
+            .map_err(|e| anyhow!("Failed to initialize FunASR engine: {}", e))
+    })?;
 
     info!("FunASR engine initialized successfully");
     Ok(engine)
 }
 
-/// Get or initialize the Sherpa-ONNX engine (OnceLock, initialized once globally)
+/// Get or initialize the Sherpa-ONNX engine (cached globally, race-free via get_or_init)
 async fn get_or_init_sherpa_onnx<R: Runtime>(
     app: &AppHandle<R>,
     model: Option<&str>,
@@ -916,12 +933,10 @@ async fn get_or_init_sherpa_onnx<R: Runtime>(
         model_dir.display()
     );
 
-    let provider = SherpaOnnxProvider::new(&model_dir)
-        .map_err(|e| anyhow!("Failed to initialize Sherpa-ONNX engine: {}", e))?;
-    let provider = Arc::new(provider);
-
-    SHERPA_ONNX_ENGINE.set(provider.clone())
-        .map_err(|_| anyhow!("Sherpa-ONNX engine already initialized"))?;
+    let provider = init_engine_cache(&SHERPA_ONNX_ENGINE, || {
+        SherpaOnnxProvider::new(&model_dir)
+            .map_err(|e| anyhow!("Failed to initialize Sherpa-ONNX engine: {}", e))
+    })?;
 
     info!("Sherpa-ONNX engine initialized successfully");
     Ok(provider)
@@ -1045,6 +1060,73 @@ pub async fn is_retranscription_in_progress_command() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn test_init_engine_cache_returns_same_arc_and_ok() {
+        use std::sync::Barrier;
+
+        let slot = Arc::new(OnceLock::<Arc<String>>::new());
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let slot = slot.clone();
+            let barrier = barrier.clone();
+            let counter = constructions.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                init_engine_cache(&slot, || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, String>("engine".to_string())
+                })
+            }));
+        }
+
+        let results: Vec<Result<Arc<String>, String>> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        for (i, r) in results.iter().enumerate() {
+            assert!(
+                r.is_ok(),
+                "caller {i} got Err under concurrent init: {:?}",
+                r.as_ref().err()
+            );
+        }
+        let first = results[0].as_ref().unwrap();
+        for r in &results[1..] {
+            assert!(Arc::ptr_eq(first, r.as_ref().unwrap()));
+        }
+        assert!(slot.get().is_some());
+
+        let later = init_engine_cache(&slot, || Ok::<_, String>("engine".to_string())).unwrap();
+        assert!(Arc::ptr_eq(first, &later));
+    }
+
+    #[test]
+    fn test_init_engine_cache_propagates_construction_error() {
+        let slot: OnceLock<Arc<String>> = OnceLock::new();
+
+        let err = init_engine_cache(&slot, || Err::<String, _>("boom".to_string()))
+            .unwrap_err();
+        assert_eq!(err, "boom");
+        assert!(slot.get().is_none());
+
+        let recovered = init_engine_cache(&slot, || Ok::<_, String>("engine".to_string())).unwrap();
+        assert_eq!(*recovered, "engine");
+    }
+
+    #[test]
+    fn test_sherpa_engine_initialized_once_before_segment_loop() {
+        let source = include_str!("retranscription.rs");
+        let needle = concat!("get_or_init", "_sherpa_onnx");
+        let count = source.matches(needle).count();
+        assert_eq!(
+            count, 2,
+            "the sherpa init helper must appear exactly twice: the pre-loop init call and the async fn definition; per-segment calls inside the segment loop are forbidden"
+        );
+    }
 
     #[test]
     fn test_create_transcript_segments_empty() {
