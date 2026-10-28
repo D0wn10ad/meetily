@@ -1,7 +1,15 @@
 use sqlx::{migrate::MigrateDatabase, Result, Sqlite, SqlitePool, Transaction};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::Manager;
+
+/// Build the WAL/SHM sidecar path for a database file.
+/// e.g. `/a/b/app.db` + `-wal` => `/a/b/app.db-wal`.
+fn sidecar_path(db: &Path, suffix: &str) -> PathBuf {
+    let mut name = db.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    db.with_file_name(name)
+}
 
 #[derive(Clone)]
 pub struct DatabaseManager {
@@ -44,10 +52,6 @@ impl DatabaseManager {
             if !incompatible {
                 return Err(migrate_err.into());
             }
-            log::warn!(
-                "Database migration failed (incompatible existing database): {}. Backing it up and recreating a fresh one.",
-                err_str
-            );
             pool.close().await;
 
             let db_path = Path::new(tauri_db_path);
@@ -57,16 +61,31 @@ impl DatabaseManager {
                 .unwrap_or(0);
             let backup_path = db_path.with_extension(format!("sqlite.bak-{}", ts));
 
+            // Loud, recoverable error: the incompatible database is backed up to
+            // `backup_path` and a fresh one is created, so the user can recover
+            // the original data from the backup file.
+            log::error!(
+                "Database migration failed (incompatible existing database): {}. Backing it up to {} and recreating a fresh one.",
+                err_str,
+                backup_path.display()
+            );
+
             if db_path.exists() {
-                fs::rename(db_path, &backup_path).map_err(|e| sqlx::Error::Io(e))?;
+                tokio::fs::rename(db_path, &backup_path)
+                    .await
+                    .map_err(|e| sqlx::Error::Io(e))?;
                 log::warn!("Backed up incompatible database to {}", backup_path.display());
             }
             // Remove stale WAL/SHM sidecars belonging to the old database file
-            for sidecar in [format!("{}-wal", tauri_db_path), format!("{}-shm", tauri_db_path)] {
-                let sidecar_path = Path::new(&sidecar);
-                if sidecar_path.exists() {
-                    if let Err(e) = fs::remove_file(sidecar_path) {
-                        log::warn!("Failed to remove stale sidecar {}: {}", sidecar, e);
+            for suffix in ["-wal", "-shm"] {
+                let sidecar = sidecar_path(db_path, suffix);
+                if sidecar.exists() {
+                    if let Err(e) = tokio::fs::remove_file(&sidecar).await {
+                        log::warn!(
+                            "Failed to remove stale sidecar {}: {}",
+                            sidecar.display(),
+                            e
+                        );
                     }
                 }
             }
@@ -249,5 +268,62 @@ impl DatabaseManager {
         log::info!("Database connection pool closed");
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sidecar_path_wal_and_shm() {
+        assert_eq!(
+            sidecar_path(Path::new("/a/b/app.db"), "-wal"),
+            PathBuf::from("/a/b/app.db-wal")
+        );
+        assert_eq!(
+            sidecar_path(Path::new("/a/b/app.db"), "-shm"),
+            PathBuf::from("/a/b/app.db-shm")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sidecar_path_non_utf8_keeps_parent() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let parent = PathBuf::from("/a/b");
+        let name = OsString::from_vec(vec![b'a', b'p', b'p', 0xFF, b'.', b'd', b'b']);
+        let db = parent.join(name);
+        let sidecar = sidecar_path(&db, "-wal");
+        assert_eq!(sidecar.parent(), Some(parent.as_path()));
+        // The raw bytes must be preserved; a `format!`-based helper would
+        // lossy-replace the 0xFF byte and fail this assertion.
+        let expected = vec![b'a', b'p', b'p', 0xFF, b'.', b'd', b'b', b'-', b'w', b'a', b'l'];
+        assert_eq!(sidecar.file_name().unwrap().as_bytes(), expected.as_slice());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn test_sidecar_path_keeps_parent() {
+        let db = Path::new("/a/b/app.db");
+        let sidecar = sidecar_path(db, "-wal");
+        assert_eq!(sidecar.parent(), Some(Path::new("/a/b")));
+        assert_eq!(sidecar.file_name().unwrap(), "app.db-wal");
+    }
+
+    #[test]
+    fn test_incompatible_branch_logs_at_error_level() {
+        let source = include_str!("manager.rs");
+        // The message text must still be present (now under `log::error!`).
+        assert!(
+            source.contains("Database migration failed (incompatible existing database)"),
+            "incompatible branch message must be present"
+        );
+        // The old warn-level form must be gone.
+        assert!(
+            !source.contains("log::warn!(\"Database migration failed (incompatible existing database)"),
+            "old warn-level incompatible log must be removed"
+        );
     }
 }
