@@ -92,6 +92,29 @@ pub fn generate_recording_filename(format: &str) -> String {
     format!("recording_{}.{}", timestamp, format)
 }
 
+/// The backend to apply for these preferences, validated against the supported set.
+/// Single source of truth shared by the load and save paths.
+#[cfg(target_os = "macos")]
+fn desired_backend(preferences: &RecordingPreferences) -> Option<AudioCaptureBackend> {
+    preferences
+        .system_audio_backend
+        .as_deref()
+        .and_then(AudioCaptureBackend::from_string)
+}
+
+/// Apply the preferences' backend to the global config in one operation.
+///
+/// Single call site for the preference → global direction. The load path
+/// normalizes the stored value via `desired_backend` without reading the
+/// global, so no load-then-set window exists.
+#[cfg(target_os = "macos")]
+pub(crate) fn sync_backend_config(preferences: &RecordingPreferences) {
+    if let Some(backend) = desired_backend(preferences) {
+        info!("Setting audio capture backend to: {:?}", backend);
+        crate::audio::capture::set_current_backend(backend);
+    }
+}
+
 /// Load recording preferences from store
 pub async fn load_recording_preferences<R: Runtime>(
     app: &AppHandle<R>,
@@ -112,11 +135,15 @@ pub async fn load_recording_preferences<R: Runtime>(
             #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
             Ok(mut p) => {
                 info!("Loaded recording preferences from store");
-                // Update macOS backend to current value if needed
+                // Normalize the stored backend via the same helper the save
+                // path uses; the global config is intentionally NOT read here
+                // (reading it created a load-then-set window where a
+                // concurrent backend change was lost).
                 #[cfg(target_os = "macos")]
                 {
-                    let backend = crate::audio::capture::get_current_backend();
-                    p.system_audio_backend = Some(backend.to_string());
+                    if let Some(backend) = desired_backend(&p) {
+                        p.system_audio_backend = Some(backend.to_string());
+                    }
                 }
                 p
             }
@@ -166,12 +193,7 @@ pub async fn save_recording_preferences<R: Runtime>(
 
     // Save backend preference to global config
     #[cfg(target_os = "macos")]
-    if let Some(backend_str) = &preferences.system_audio_backend {
-        if let Some(backend) = AudioCaptureBackend::from_string(backend_str) {
-            info!("Setting audio capture backend to: {:?}", backend);
-            crate::audio::capture::set_current_backend(backend);
-        }
-    }
+    sync_backend_config(preferences);
 
     // Ensure the directory exists
     ensure_recordings_directory(&preferences.save_folder)?;
@@ -194,6 +216,9 @@ pub async fn set_recording_preferences<R: Runtime>(
     app: AppHandle<R>,
     preferences: RecordingPreferences,
 ) -> Result<(), String> {
+    // NOTE: `set_audio_backend` must be used independently of
+    // `set_recording_preferences` — both write the same global backend config,
+    // so calling them together can clobber each other's backend choice.
     save_recording_preferences(&app, &preferences)
         .await
         .map_err(|e| format!("Failed to save recording preferences: {}", e))
@@ -384,6 +409,57 @@ pub async fn get_audio_backend_info() -> Result<Vec<BackendInfo>, String> {
             name: "ScreenCaptureKit".to_string(),
             description: "Default system audio capture".to_string(),
         }])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_path_does_not_read_the_global_backend() {
+        let source = include_str!("recording_preferences.rs");
+        // Scope the guard to the load function body only: the legitimate
+        // `get_current_backend` read lives in the `get_current_audio_backend`
+        // command, which must not trip this assertion.
+        let start = source
+            .find("pub async fn load_recording_preferences")
+            .expect("load fn signature present");
+        let end = source
+            .find("pub async fn save_recording_preferences")
+            .expect("save fn signature present");
+        let load_body = &source[start..end];
+        let needle = concat!("get_current", "_backend");
+        assert_eq!(
+            load_body.matches(needle).count(),
+            0,
+            "the load path must not read the global backend (get_current_backend); reading it created a load-then-set race"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_desired_backend_valid_invalid_and_none() {
+        let mut prefs = RecordingPreferences::default();
+        assert_eq!(desired_backend(&prefs), None);
+        prefs.system_audio_backend = Some("screencapturekit".to_string());
+        assert_eq!(
+            desired_backend(&prefs),
+            AudioCaptureBackend::from_string("screencapturekit")
+        );
+        prefs.system_audio_backend = Some("nonsense".to_string());
+        assert_eq!(desired_backend(&prefs), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_desired_backend_load_and_save_agree() {
+        let prefs = RecordingPreferences {
+            system_audio_backend: Some("coreaudio".to_string()),
+            ..Default::default()
+        };
+        let applied = desired_backend(&prefs).map(|b| b.to_string());
+        assert_eq!(applied.as_deref(), prefs.system_audio_backend.as_deref());
     }
 }
 
