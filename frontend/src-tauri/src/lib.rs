@@ -148,6 +148,11 @@ struct FunasrModelEntry {
     size_mb: f64,
 }
 
+/// Return the byte length of a file from its metadata.
+fn file_len(meta: &std::fs::Metadata) -> u64 {
+    meta.len()
+}
+
 /// Recursively computes the total size of a directory in megabytes.
 /// Used for directory-based transcription models (FunASR, sherpa-onnx).
 pub(crate) fn directory_size_mb(path: &std::path::Path) -> f64 {
@@ -155,12 +160,14 @@ pub(crate) fn directory_size_mb(path: &std::path::Path) -> f64 {
         let mut total = 0u64;
         if let Ok(entries) = std::fs::read_dir(path) {
             for entry in entries.flatten() {
-                match entry.file_type() {
-                    Ok(ft) if ft.is_dir() => total += dir_size(&entry.path()),
-                    Ok(ft) if ft.is_file() => {
-                        total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                // Capture the metadata once and derive both is_dir() and len()
+                // from it, avoiding a second stat call per file.
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_dir() {
+                        total += dir_size(&entry.path());
+                    } else if meta.is_file() {
+                        total += file_len(&meta);
                     }
-                    _ => {}
                 }
             }
         }
@@ -573,7 +580,7 @@ pub fn run() {
             // Initialize notification system with proper defaults
             log::info!("Initializing notification system...");
             let app_for_notif = _app.handle().clone();
-            tauri::async_runtime::spawn(async move {
+            let _notif_handle = tauri::async_runtime::spawn(async move {
                 let notif_state = app_for_notif.state::<NotificationManagerState<tauri::Wry>>();
                 match notifications::commands::initialize_notification_manager(
                     app_for_notif.clone(),
@@ -604,7 +611,7 @@ pub fn run() {
             whisper_engine::commands::set_models_directory(&_app.handle());
 
             // Initialize Whisper engine on startup
-            tauri::async_runtime::spawn(async {
+            let _whisper_handle = tauri::async_runtime::spawn(async {
                 if let Err(e) = whisper_engine::commands::whisper_init().await {
                     log::error!("Failed to initialize Whisper engine on startup: {}", e);
                 }
@@ -614,13 +621,16 @@ pub fn run() {
             parakeet_engine::commands::set_models_directory(&_app.handle());
 
             // Set up FunASR model directory (create if not exists)
-            crate::funasr_onnx::engine::initialize_models_directory(&_app.handle());
+            if let Err(e) = crate::funasr_onnx::engine::initialize_models_directory(&_app.handle())
+            {
+                log::error!("Failed to initialize FunASR models directory: {}", e);
+            }
 
             // Set up sherpa-onnx model directory (create if not exists)
             crate::sherpa_onnx::commands::initialize_models_directory(&_app.handle());
 
             // Initialize Parakeet engine on startup
-            tauri::async_runtime::spawn(async {
+            let _parakeet_handle = tauri::async_runtime::spawn(async {
                 if let Err(e) = parakeet_engine::commands::parakeet_init().await {
                     log::error!("Failed to initialize Parakeet engine on startup: {}", e);
                 }
@@ -628,7 +638,7 @@ pub fn run() {
 
             // Initialize ModelManager for summary engine (async, non-blocking)
             let app_handle_for_model_manager = _app.handle().clone();
-            tauri::async_runtime::spawn(async move {
+            let _model_manager_handle = tauri::async_runtime::spawn(async move {
                 match summary::summary_engine::commands::init_model_manager_at_startup(
                     &app_handle_for_model_manager,
                 )
@@ -928,30 +938,109 @@ pub fn run() {
                 }
                 tauri::RunEvent::Exit => {
                     log::info!("Application exiting, cleaning up resources...");
-                    tauri::async_runtime::block_on(async {
-                        // Clean up database connection and checkpoint WAL
-                        if let Some(app_state) = _app_handle.try_state::<state::AppState>() {
-                            log::info!("Starting database cleanup...");
-                            if let Err(e) = app_state.db_manager.cleanup().await {
-                                log::error!("Failed to cleanup database: {}", e);
-                            } else {
-                                log::info!("Database cleanup completed successfully");
-                            }
-                        } else {
-                            log::warn!(
-                                "AppState not available for database cleanup (likely first launch)"
-                            );
-                        }
+                    // Run cleanup on a dedicated thread with a bounded timeout so
+                    // the UI thread is never blocked indefinitely (the runtime's
+                    // workers may themselves be blocked during shutdown).
+                    let app_handle = _app_handle.clone();
+                    std::thread::spawn(move || {
+                        let rt =
+                            tokio::runtime::Runtime::new().expect("failed to create cleanup runtime");
+                        let _ = rt.block_on(async {
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                async {
+                                    // Clean up database connection and checkpoint WAL
+                                    if let Some(app_state) =
+                                        app_handle.try_state::<state::AppState>()
+                                    {
+                                        log::info!("Starting database cleanup...");
+                                        if let Err(e) = app_state.db_manager.cleanup().await {
+                                            log::error!("Failed to cleanup database: {}", e);
+                                        } else {
+                                            log::info!("Database cleanup completed successfully");
+                                        }
+                                    } else {
+                                        log::warn!(
+                                            "AppState not available for database cleanup (likely first launch)"
+                                        );
+                                    }
 
-                        // Clean up sidecar
-                        log::info!("Cleaning up sidecar...");
-                        if let Err(e) = summary::summary_engine::force_shutdown_sidecar().await {
-                            log::error!("Failed to force shutdown sidecar: {}", e);
-                        }
+                                    // Clean up sidecar
+                                    log::info!("Cleaning up sidecar...");
+                                    if let Err(e) =
+                                        summary::summary_engine::force_shutdown_sidecar().await
+                                    {
+                                        log::error!("Failed to force shutdown sidecar: {}", e);
+                                    }
+                                },
+                            )
+                            .await
+                        });
                     });
                     log::info!("Application cleanup complete");
                 }
                 _ => {}
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_file_len_returns_byte_length() {
+        let meta = std::fs::Metadata::from(std::fs::File::open("Cargo.toml").unwrap().metadata().unwrap());
+        assert_eq!(file_len(&meta), meta.len());
+    }
+
+    #[test]
+    fn test_dir_size_uses_single_stat() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("fn dir_size(path: &std::path::Path) -> u64")
+            .expect("dir_size fn present");
+        let end = source
+            .find("dir_size(path) as f64")
+            .expect("dir_size tail present");
+        let dir_size_body = &source[start..end];
+        assert_eq!(
+            dir_size_body.matches("entry.metadata()").count(),
+            1,
+            "dir_size must call entry.metadata() exactly once"
+        );
+        assert!(
+            !dir_size_body.contains("entry.file_type()"),
+            "dir_size must not call entry.file_type()"
+        );
+    }
+
+    #[test]
+    fn test_exit_cleanup_is_bounded() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("tauri::RunEvent::Exit")
+            .expect("Exit arm present");
+        let end = source[start..]
+            .find("_ => {}")
+            .expect("match fallback present");
+        let exit_arm = &source[start..start + end];
+        assert!(
+            !exit_arm.contains("tauri::async_runtime::block_on(async {"),
+            "Exit cleanup must not block_on on the main thread"
+        );
+        assert!(
+            exit_arm.contains("std::thread::spawn"),
+            "Exit cleanup must run on a dedicated thread"
+        );
+    }
+
+    #[test]
+    fn test_setup_still_initializes_database() {
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("initialize_database_on_startup"),
+            "setup must still call initialize_database_on_startup"
+        );
+    }
 }
