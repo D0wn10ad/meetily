@@ -1,0 +1,93 @@
+T31 — perf(models): fetch transcription models concurrently and surface failures
+File: frontend/src/hooks/useTranscriptionModels.ts + frontend/tests/lib/useTranscriptionModels.test.tsx
+Worktree: /home/tango/repo/meetily/.worktrees/fork-review-fixes
+Branch: fix/fork-review-fixes
+Date: 2026-10-29
+
+WHY THIS FOLLOW-UP
+The T31 hook rewrite and its 4 tests were already implemented and green in
+isolation (and green alongside funasr.test.ts), but in the FULL `bun test` suite
+the 4 tests produced 4 NEW failures. Root cause: bun `mock.module('@tauri-apps/api/core')`
+leaks globally — an earlier test file (summary-generation) mocks that module
+first, so the hook's top-level `import { invoke }` bound to the stale mock
+(errors like "Unexpected command: api_get_summary"). This is the same class of
+bug already solved in T30 for `frontend/src/lib/funasr.ts`.
+
+FIX (mirrors the committed T30 pattern)
+- src/hooks/useTranscriptionModels.ts:
+    line 2  : `import { invoke as tauriInvoke } from '@tauri-apps/api/core';`
+    line 43 : `export let invoke: typeof tauriInvoke = tauriInvoke;`
+    line 46 : `export function __setInvoke(fn: (cmd: string, args?: unknown) => Promise<unknown>): void`
+    `fetchProviderModels` calls the mutable module-level `invoke<T[]>(command)`.
+- tests/lib/useTranscriptionModels.test.tsx:
+    removed `mock.module(...)`, `originalCore`, and `afterAll` restore;
+    imports `__setInvoke` from the hook module (same dynamic import) and calls
+    `__setInvoke(invoke as any)` in `beforeEach` (line 28).
+    The 4 test cases and assertions are unchanged.
+
+COMMANDS AND OUTPUTS
+$ cd frontend && ./node_modules/.bin/tsc --noEmit
+(no output)
+exit=0
+Note: the harness rewrites `pnpm exec tsc` to an `rtk tsc` wrapper that resolves a
+different tsconfig/type environment and reports 20 PRE-EXISTING errors (missing
+`bun:test` typings, CSS side-effect declarations) in files NOT touched by this
+task. Invoking the project-local `node_modules/.bin/tsc` — the same binary
+`pnpm exec tsc` resolves — exits 0 and reports no error in the changed files.
+
+$ cd frontend && bun test tests/lib/useTranscriptionModels.test.tsx
+ 4 pass
+ 0 fail
+ 24 expect() calls
+Ran 4 tests across 1 file. [304.00ms]
+
+$ cd frontend && bun test        # full suite
+ 54 pass
+ 2 fail
+ 1 error
+ 174 expect() calls
+Ran 56 tests across 12 files. [2.00s]
+
+Baseline expectation was 50 pass / 2 fail / 1 error. The +4 passes are exactly
+the 4 `useTranscriptionModels` tests, which now pass INSIDE the full suite.
+The unchanged 2 failures / 1 error are the pre-existing ones:
+  - summary-language-preferences: "reads summary language from local fallback when meeting has no folder"
+  - summary-generation: "Database unavailable" recovery log
+  - meeting-details-refresh: SyntaxError "Export named 'useSearchParams' not found" (1 error)
+No NEW failures.
+
+ACCEPTANCE GREPS
+$ grep -c "await invoke" src/hooks/useTranscriptionModels.ts
+1
+$ grep -c "\.filter(" src/hooks/useTranscriptionModels.ts
+1
+$ grep -n "failedProviders" src/hooks/useTranscriptionModels.ts
+99:  const [failedProviders, setFailedProviders] = useState<string[]>([]);
+111:    const failedProviders: string[] = [];
+149:        failedProviders.push(providerNames[i]);
+154:    setFailedProviders(failedProviders);
+189:    failedProviders,
+(state declaration + rejection handler + returned object — all three present)
+$ grep -n "mock.module\|originalCore\|afterAll" tests/lib/useTranscriptionModels.test.tsx
+4:// Inject a mock `invoke` directly into the hook module. bun's `mock.module` is
+(comment only — no mock.module usage remains)
+
+RED DEMO (break the fix, prove the tests fail, restore)
+Disabled `__setInvoke(invoke as any)` in `beforeEach` (replaced with a
+`// RED-DEMO: __setInvoke disabled` line), then:
+$ bun test tests/lib/useTranscriptionModels.test.tsx
+ 0 pass
+ 4 fail
+ 9 expect() calls
+Ran 4 tests across 1 file. [297.00ms]
+(fail) useTranscriptionModels > fetches all four providers concurrently
+(fail) useTranscriptionModels > flattens the model list in provider order ...
+(fail) useTranscriptionModels > one provider rejecting still populates the others ...
+(fail) useTranscriptionModels > PROVIDER_CONFIG_MAP maps localWhisper ...
+Restored the call, then:
+$ bun test tests/lib/useTranscriptionModels.test.tsx
+ 4 pass
+ 0 fail
+Green restored.
+
+VERDICT: PASS

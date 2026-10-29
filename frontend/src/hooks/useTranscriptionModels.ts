@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 
 export interface RawModelInfo {
   name: string;
@@ -34,6 +34,56 @@ interface TranscriptModelConfig {
 }
 
 /**
+ * The `invoke` function used to talk to the Rust backend.
+ *
+ * Exposed as a module-level binding so tests can inject a mock without relying
+ * on bun's global `mock.module` (which leaks across test files). Production
+ * callers never pass an argument and always use the real Tauri `invoke`.
+ */
+export let invoke: typeof tauriInvoke = tauriInvoke;
+
+/** Test-only hook: replace the `invoke` binding with a mock. */
+export function __setInvoke(fn: (cmd: string, args?: unknown) => Promise<unknown>): void {
+  invoke = fn as typeof tauriInvoke;
+}
+
+/**
+ * Maps a saved config provider value to the `ModelOption['provider']` used in the
+ * model list. `localWhisper` is the legacy config value for the whisper provider.
+ */
+export const PROVIDER_CONFIG_MAP: Record<string, ModelOption['provider']> = {
+  localWhisper: 'whisper',
+  whisper: 'whisper',
+  parakeet: 'parakeet',
+  funasr: 'funasr',
+  'sherpa-onnx': 'sherpa-onnx',
+};
+
+/**
+ * Fetch one provider's models and map the usable entries to `ModelOption`s.
+ *
+ * Shared by all four providers so the fetch-then-filter-map block exists once.
+ * `isUsable` decides which raw entries are kept (e.g. `status === 'Available'`
+ * for whisper/parakeet, `valid` for funasr/sherpa-onnx).
+ */
+export async function fetchProviderModels<T>(
+  command: string,
+  provider: ModelOption['provider'],
+  displayPrefix: string,
+  isUsable: (item: T) => boolean
+): Promise<ModelOption[]> {
+  const raw = await invoke<T[]>(command);
+  return raw
+    .filter(isUsable)
+    .map((m) => ({
+      provider,
+      name: (m as { name: string }).name,
+      displayName: `${displayPrefix}${(m as { name: string }).name}`,
+      size_mb: (m as { size_mb: number }).size_mb,
+    }));
+}
+
+/**
  * Custom hook for fetching and managing transcription models (Whisper and Parakeet).
  *
  * This hook centralizes the model fetching logic that was previously duplicated
@@ -46,6 +96,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [selectedModelKey, setSelectedModelKey] = useState<string>('');
   const [loadingModels, setLoadingModels] = useState(false);
+  const [failedProviders, setFailedProviders] = useState<string[]>([]);
   // Track whether the user has manually changed the model selection
   const userSelectedRef = useRef(false);
 
@@ -57,86 +108,58 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
 
   const fetchModels = useCallback(async () => {
     setLoadingModels(true);
+    const failedProviders: string[] = [];
+
+    // Fetch all four providers CONCURRENTLY, then flatten in the original order
+    // (whisper, parakeet, funasr, sherpa-onnx) so the model-list ordering is unchanged.
+    const results = await Promise.allSettled([
+      fetchProviderModels<RawModelInfo>(
+        'whisper_get_available_models',
+        'whisper',
+        '🏠 Whisper: ',
+        (m) => m.status === 'Available'
+      ),
+      fetchProviderModels<RawModelInfo>(
+        'parakeet_get_available_models',
+        'parakeet',
+        '⚡ Parakeet: ',
+        (m) => m.status === 'Available'
+      ),
+      fetchProviderModels<FunasrModelEntry>(
+        'api_scan_funasr_models',
+        'funasr',
+        '🎯 FunASR (Paraformer): ',
+        (m) => m.valid
+      ),
+      fetchProviderModels<SherpaOnnxModelEntry>(
+        'sherpa_onnx_scan_models',
+        'sherpa-onnx',
+        '🏷️ Sherpa-ONNX: ',
+        (m) => m.valid
+      ),
+    ]);
+
+    const providerNames = ['whisper', 'parakeet', 'funasr', 'sherpa-onnx'] as const;
     const allModels: ModelOption[] = [];
-
-    // Fetch Whisper models
-    try {
-      const whisperModels = await invoke<RawModelInfo[]>('whisper_get_available_models');
-      const availableWhisper = whisperModels
-        .filter((m) => m.status === 'Available')
-        .map((m) => ({
-          provider: 'whisper' as const,
-          name: m.name,
-          displayName: `🏠 Whisper: ${m.name}`,
-          size_mb: m.size_mb,
-        }));
-      allModels.push(...availableWhisper);
-    } catch (err) {
-      console.error('Failed to fetch Whisper models:', err);
-    }
-
-    // Fetch Parakeet models
-    try {
-      const parakeetModels = await invoke<RawModelInfo[]>('parakeet_get_available_models');
-      const availableParakeet = parakeetModels
-        .filter((m) => m.status === 'Available')
-        .map((m) => ({
-          provider: 'parakeet' as const,
-          name: m.name,
-          displayName: `⚡ Parakeet: ${m.name}`,
-          size_mb: m.size_mb,
-        }));
-      allModels.push(...availableParakeet);
-    } catch (err) {
-      console.error('Failed to fetch Parakeet models:', err);
-    }
-
-    // Fetch FunASR models
-    try {
-      const funasrModels = await invoke<FunasrModelEntry[]>('api_scan_funasr_models');
-      const availableFunasr = funasrModels
-        .filter((m) => m.valid)
-        .map((m) => ({
-          provider: 'funasr' as const,
-          name: m.name,
-          displayName: `🎯 FunASR (Paraformer): ${m.name}`,
-          size_mb: m.size_mb,
-        }));
-      allModels.push(...availableFunasr);
-    } catch (err) {
-      console.error('Failed to fetch FunASR models:', err);
-    }
-
-    // Fetch Sherpa-ONNX models
-    try {
-      const sherpaOnnxModels = await invoke<SherpaOnnxModelEntry[]>('sherpa_onnx_scan_models');
-      const availableSherpaOnnx = sherpaOnnxModels
-        .filter((m) => m.valid)
-        .map((m) => ({
-          provider: 'sherpa-onnx' as const,
-          name: m.name,
-          displayName: `🏷️ Sherpa-ONNX: ${m.name}`,
-          size_mb: m.size_mb,
-        }));
-      allModels.push(...availableSherpaOnnx);
-    } catch (err) {
-      console.error('Failed to fetch Sherpa-ONNX models:', err);
-    }
+    results.forEach((result, i) => {
+      if (result.status === 'fulfilled') {
+        allModels.push(...result.value);
+      } else {
+        console.error(`Failed to fetch ${providerNames[i]} models:`, result.reason);
+        failedProviders.push(providerNames[i]);
+      }
+    });
 
     setAvailableModels(allModels);
+    setFailedProviders(failedProviders);
 
     // Set default model based on user's saved configuration
     const configuredProvider = transcriptModelConfig?.provider || '';
     const configuredModel = transcriptModelConfig?.model || '';
 
-    // Try to match the configured model
-    // Note: 'localWhisper' in config maps to 'whisper' provider in model list
+    // Try to match the configured model via the provider lookup map
     const configuredMatch = allModels.find(
-      (m) =>
-        (configuredProvider === 'localWhisper' && m.provider === 'whisper' && m.name === configuredModel) ||
-        (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel) ||
-        (configuredProvider === 'funasr' && m.provider === 'funasr' && m.name === configuredModel) ||
-        (configuredProvider === 'sherpa-onnx' && m.provider === 'sherpa-onnx' && m.name === configuredModel)
+      (m) => m.provider === PROVIDER_CONFIG_MAP[configuredProvider] && m.name === configuredModel
     );
 
     // Only set default model if user hasn't manually selected one
@@ -163,6 +186,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     selectedModelKey,
     setSelectedModelKey: setSelectedModelKeyWithTracking,
     loadingModels,
+    failedProviders,
     fetchModels,
     resetSelection,
   };
