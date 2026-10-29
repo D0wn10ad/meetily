@@ -1185,7 +1185,7 @@ These failures/broken tools exist **before** this work starts. They are environm
   Evidence: `.omo/evidence/task-31-fork-review-fixes.txt`
   Commit: Y | `perf(models): fetch transcription models concurrently and surface failures`
 
-- [ ] 32. `.github/verify-windows-dlls.ps1` — harden the Windows DLL verification script (9 findings) — STATIC VERIFICATION ONLY
+- [x] 32. `.github/verify-windows-dlls.ps1` — harden the Windows DLL verification script (9 findings) — STATIC VERIFICATION ONLY
   **This todo has NO runtime verification available: `pwsh` / `powershell` are NOT installed on this machine. TDD is therefore NOT applicable here — the todo is verified statically (source-level assertions), and the evidence file MUST state this limitation explicitly and record that execution is deferred to the Windows CI job that runs this script. Do not claim the script was executed.**
   What to do / Must NOT do:
   1. **COM availability check (low/maintainability, lines 45-54).** The `WindowsInstaller.Installer` COM object is used through `InvokeMember` for every call; if the type is not registered on the runner, the COM exception falls into the catch and the whole installer check silently degrades to the `msiexec` fallback. Add an EXPLICIT presence check for the WindowsInstaller COM type at the start of the installer check (e.g. try to create the object and report explicitly that the check was skipped because the COM type is unavailable) so the degradation is visible in the log instead of silent.
