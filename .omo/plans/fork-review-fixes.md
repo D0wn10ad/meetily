@@ -1297,7 +1297,7 @@ These failures/broken tools exist **before** this work starts. They are environm
   Evidence: `.omo/evidence/task-34-fork-review-fixes.txt`
   Commit: Y | `fix(funasr-ui): persist model selection before notifying the parent`
 
-- [ ] 33. Upstream deferral PR — package the 10 deferred upstream-origin findings as a standalone branch + PR body (10 findings, no new source file in the fork branch)
+- [x] 33. Upstream deferral PR — package the 10 deferred upstream-origin findings as a standalone branch + PR body (10 findings, no new source file in the fork branch)
   **Scope of this todo: it produces a BRANCH + COMMITS + a PR description — it does NOT push, does NOT open a PR, and does NOT touch the fork branch. The user pushes and opens the PR.**
   What to do / Must NOT do:
   1. Create a SEPARATE worktree `/home/tango/repo/meetily/.worktrees/upstream-deferrals` on a NEW branch `fix/upstream-review-deferrals` based on `upstream/main` (the upstream base commit). **Never commit anything from this todo onto `fix/fork-review-fixes`.** The fork branch must remain free of upstream-origin changes.

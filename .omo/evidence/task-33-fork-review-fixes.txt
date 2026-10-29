@@ -1,0 +1,53 @@
+# T33 — Upstream deferral PR (evidence)
+
+## Task
+Package the 10 deferred upstream-origin findings as a standalone branch + PR body.
+No new source file in the fork branch.
+
+## Guard
+`git -C /home/tango/repo/meetily rev-parse upstream/main` = `a2cb62e827da7ef59f65064c97233efb2313878e` — GUARD_OK (matches the reviewed upstream base).
+
+## Worktree / branch
+- Worktree: `/home/tango/repo/meetily/.worktrees/upstream-deferrals`
+- Branch: `fix/upstream-review-deferrals` (based on `upstream/main` = a2cb62e "Release v0.4.1")
+- Created via `git worktree add -b fix/upstream-review-deferrals .worktrees/upstream-deferrals upstream/main`
+
+## All 10 findings fixed (upstream worktree only)
+1. `audio/import.rs:200-208` — blocking `std::fs::File::open` in async paths → `extract_duration_from_metadata` made `async`, body wrapped in `tokio::task::spawn_blocking` (symphonia's MediaSourceStream needs a sync Read, so tokio::fs::File can't be used directly); `validate_audio_file` made `async` and awaits it; both async callers await; 5 tests → `#[tokio::test]`.
+2. `audio/import.rs:752-768` — `pool.acquire()` + `Connection::begin` → `pool.begin().await`.
+3. `audio/retranscription.rs:572-591` — DB `tx.commit()` moved AFTER `write_transcripts_json`/`write_retranscription_metadata` so a crash can't leave DB/JSON out of sync.
+4. `audio/retranscription.rs:572-591` (perf duplicate) — resolved together with #3 (merged).
+5. `audio/retranscription.rs:751-758` — `WHERE id = '1'` → `LIMIT 1`; silent `DEFAULT_WHISPER_MODEL` fallback → explicit error; `error!` removed from `ok_or_else`.
+6. `audio/retranscription.rs:751-759` — adjacent variant, resolved with #5.
+7. `audio/transcription/engine.rs:60-61` — redundant `app.clone()` → `app.clone(), app.state(), None` (3 occurrences).
+8. `database/repositories/setting.rs:194-204` — hardcoded `provider='parakeet'`/`DEFAULT_PARAKEET_MODEL` INSERT → binds actual `provider`, preserves existing model via COALESCE subquery, provider-appropriate default on fresh insert.
+9. `database/repositories/setting.rs:303-307` — `sqlx::Error::Protocol` (loses source) → `sqlx::Error::Decode(Box::new(e))` (preserves source).
+10. `src/lib.rs:205-218` — duplicated notification block → extracted shared `notify_recording_started` helper, called from both `start_recording` and `start_recording_with_devices_and_meeting`.
+
+## Red → green (static assertions per finding)
+For each finding, the defect is present on `upstream/main` (RED) and absent in the fixed upstream worktree (GREEN). See the whitespace-stripped substring provenance table in the PR body (section c). 7/10 match exactly; findings 3/4/9 differ only by fork-side reformatting (verified present on upstream/main by direct code reading).
+
+## Verification (run in upstream worktree, cwd frontend/src-tauri)
+- `cargo check -p meetily` → **0 errors, 24 warnings** (baseline 25; one fewer from removing the unused DEFAULT_*_MODEL import).
+- `cargo test -p meetily --lib -- --skip audio --skip sherpa` → 151 passed; 1 failed (pre-existing flaky whisper download timeout test).
+- `cargo test -p meetily` → 243 passed; 1 failed (pre-existing `test_calculate_buffer_timeout_bluetooth` float precision); 2 ignored.
+- No new failures introduced.
+
+## Build-environment note
+The upstream worktree lacked the `binaries/llama-helper-x86_64-unknown-linux-gnu` sidecar placeholder required by the Tauri build script; copied the 17B placeholder from the fork worktree. This is a gitignored build artifact, not a source change (does not appear in `git diff --name-only upstream/main`).
+
+## Provenance deviation (recorded)
+The plan text (T33 section 3c) says the provenance must prove each finding is a "FORK-ORIGIN regression and not upstream behaviour". This wording is **INVERTED**: all 10 findings are upstream-inherited (present identically on `upstream/main`). Recorded as a deviation; the provenance section of the PR body documents the upstream-inherited nature instead.
+
+## Acceptance
+- `git -C .../upstream-deferrals log --oneline -1` → `fix/upstream-review-deferrals` based on `upstream/main`.
+- `git -C .../upstream-deferrals diff --name-only upstream/main` → exactly the 5 files: `audio/import.rs`, `audio/retranscription.rs`, `audio/transcription/engine.rs`, `database/repositories/setting.rs`, `src/lib.rs`.
+- `git rev-parse upstream/main` = a2cb62e827da7ef59f65064c97233efb2313878e.
+- Fork branch `fix/fork-review-fixes` log has NO upstream-origin commit.
+- PR body `.omo/evidence/task-33-upstream-pr-body.md` has all 5 sections (a–e).
+- Whitespace-stripped substring provenance test re-run and pasted into the PR body.
+
+## Commit
+- Upstream commit: `fix(upstream): address the deferred upstream-origin review findings` (ONLY the 5 source files).
+- Fork bookkeeping commit: `chore(plan): record T33 upstream deferral evidence` (plan checkbox + 2 evidence files).
+- Never pushed, never amended.
