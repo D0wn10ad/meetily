@@ -119,7 +119,7 @@ pub fn cancel_import() {
 
 /// Validate an audio file and return its info using metadata-only approach
 /// Falls back to full decode if metadata is unavailable
-pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
+pub async fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
     // Check file exists
     if !path.exists() {
         return Err(anyhow!("File does not exist: {}", path.display()));
@@ -162,7 +162,7 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
         .to_string();
 
     // Try fast metadata-only validation first
-    let duration_seconds = match extract_duration_from_metadata(path) {
+    let duration_seconds = match extract_duration_from_metadata(path).await {
         Ok(duration) => {
             debug!(
                 "Got duration from metadata: {:.2}s (fast path)",
@@ -192,63 +192,72 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
 
 /// Extract duration from audio file metadata without full decode
 /// Returns error if metadata is unavailable, triggering fallback to full decode
-fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
+///
+/// Runs the blocking symphonia probe on a blocking thread so it does not
+/// stall the async runtime (symphonia's `MediaSourceStream` requires a sync
+/// `std::io::Read` source, so `tokio::fs::File` cannot be used directly).
+async fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use symphonia::core::formats::FormatOptions;
+        use symphonia::core::io::MediaSourceStream;
+        use symphonia::core::meta::MetadataOptions;
+        use symphonia::core::probe::Hint;
 
-    // Open the file
-    let file = std::fs::File::open(path)
-        .map_err(|e| anyhow!("Failed to open audio file: {}", e))?;
+        // Open the file
+        let file = std::fs::File::open(&path)
+            .map_err(|e| anyhow!("Failed to open audio file: {}", e))?;
 
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
-    // Set up format hint based on file extension
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
+        // Set up format hint based on file extension
+        let mut hint = Hint::new();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            hint.with_extension(ext);
+        }
 
-    // Probe the file format (lightweight operation)
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|e| anyhow!("Failed to probe audio format: {}", e))?;
+        // Probe the file format (lightweight operation)
+        let probed = symphonia::default::get_probe()
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
+            .map_err(|e| anyhow!("Failed to probe audio format: {}", e))?;
 
-    let format = probed.format;
+        let format = probed.format;
 
-    // Find the first audio track
-    use symphonia::core::codecs::CODEC_TYPE_NULL;
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| anyhow!("No audio track found in file"))?;
+        // Find the first audio track
+        use symphonia::core::codecs::CODEC_TYPE_NULL;
+        let track = format
+            .tracks()
+            .iter()
+            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            .ok_or_else(|| anyhow!("No audio track found in file"))?;
 
-    // Extract duration from metadata
-    let sample_rate = track
-        .codec_params
-        .sample_rate
-        .ok_or_else(|| anyhow!("Unknown sample rate"))?;
+        // Extract duration from metadata
+        let sample_rate = track
+            .codec_params
+            .sample_rate
+            .ok_or_else(|| anyhow!("Unknown sample rate"))?;
 
-    let n_frames = track
-        .codec_params
-        .n_frames
-        .ok_or_else(|| anyhow!("Frame count not available in metadata"))?;
+        let n_frames = track
+            .codec_params
+            .n_frames
+            .ok_or_else(|| anyhow!("Frame count not available in metadata"))?;
 
-    let duration_seconds = n_frames as f64 / sample_rate as f64;
+        let duration_seconds = n_frames as f64 / sample_rate as f64;
 
-    debug!(
-        "Extracted metadata: {}Hz, {} frames, {:.2}s",
-        sample_rate, n_frames, duration_seconds
-    );
+        debug!(
+            "Extracted metadata: {}Hz, {} frames, {:.2}s",
+            sample_rate, n_frames, duration_seconds
+        );
 
-    Ok(duration_seconds)
+        Ok(duration_seconds)
+    })
+    .await
+    .map_err(|e| anyhow!("Metadata extraction task failed: {}", e))?
 }
 
 /// Start import of an audio file
@@ -698,8 +707,8 @@ async fn create_meeting_with_transcripts(
     let now = chrono::Utc::now();
 
     // Start transaction
-    let mut conn = pool.acquire().await.map_err(|e| anyhow!("DB error: {}", e))?;
-    let mut tx = sqlx::Connection::begin(&mut *conn)
+    let mut tx = pool
+        .begin()
         .await
         .map_err(|e| anyhow!("Failed to start transaction: {}", e))?;
 
@@ -938,7 +947,7 @@ pub async fn select_and_validate_audio_command<R: Runtime>(
             let path_str = path.to_string();
             info!("User selected: {}", path_str);
 
-            match validate_audio_file(Path::new(&path_str)) {
+            match validate_audio_file(Path::new(&path_str)).await {
                 Ok(info) => Ok(Some(info)),
                 Err(e) => {
                     error!("Validation failed: {}", e);
@@ -957,7 +966,7 @@ pub async fn select_and_validate_audio_command<R: Runtime>(
 #[tauri::command]
 pub async fn validate_audio_file_command(path: String) -> Result<AudioFileInfo, String> {
     info!("Validating audio file: {}", path);
-    validate_audio_file(Path::new(&path)).map_err(|e| e.to_string())
+    validate_audio_file(Path::new(&path)).await.map_err(|e| e.to_string())
 }
 
 /// Start importing an audio file (Beta gated using configContext.betaFeatures)
@@ -1049,12 +1058,12 @@ mod tests {
         IMPORT_CANCELLED.store(false, Ordering::SeqCst);
     }
 
-    #[test]
-    fn test_extract_duration_from_metadata_wav() {
+    #[tokio::test]
+    async fn test_extract_duration_from_metadata_wav() {
         // Test with sample WAV file if available
         let test_path = Path::new("../../backend/whisper.cpp/samples/jfk.wav");
         if test_path.exists() {
-            let result = extract_duration_from_metadata(test_path);
+            let result = extract_duration_from_metadata(test_path).await;
             // Should succeed and return a reasonable duration
             assert!(result.is_ok());
             let duration = result.unwrap();
@@ -1062,24 +1071,24 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_extract_duration_from_metadata_mp3() {
+    #[tokio::test]
+    async fn test_extract_duration_from_metadata_mp3() {
         // Test with sample MP3 file if available
         let test_path = Path::new("../../backend/whisper.cpp/samples/jfk.mp3");
         if test_path.exists() {
-            let result = extract_duration_from_metadata(test_path);
+            let result = extract_duration_from_metadata(test_path).await;
             // MP3 files may not have n_frames metadata, so fallback is expected
             // We just verify it doesn't panic
             let _ = result;
         }
     }
 
-    #[test]
-    fn test_validate_audio_file_with_metadata() {
+    #[tokio::test]
+    async fn test_validate_audio_file_with_metadata() {
         // Test validation with actual audio file
         let test_path = Path::new("../../backend/whisper.cpp/samples/jfk.wav");
         if test_path.exists() {
-            let result = validate_audio_file(test_path);
+            let result = validate_audio_file(test_path).await;
             assert!(result.is_ok());
             let info = result.unwrap();
             assert_eq!(info.format, "WAV");
@@ -1088,21 +1097,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_validate_audio_file_nonexistent() {
-        let result = validate_audio_file(Path::new("/nonexistent/file.mp4"));
+    #[tokio::test]
+    async fn test_validate_audio_file_nonexistent() {
+        let result = validate_audio_file(Path::new("/nonexistent/file.mp4")).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
 
-    #[test]
-    fn test_validate_audio_file_wrong_extension() {
+    #[tokio::test]
+    async fn test_validate_audio_file_wrong_extension() {
         // Create a temporary file with wrong extension
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join("test_audio.txt");
         let _ = std::fs::write(&temp_file, b"dummy content");
 
-        let result = validate_audio_file(&temp_file);
+        let result = validate_audio_file(&temp_file).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unsupported format"));
 

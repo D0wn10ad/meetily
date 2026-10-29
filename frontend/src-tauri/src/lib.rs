@@ -137,6 +137,23 @@ struct TranscriptionStatus {
     last_activity_ms: u64,
 }
 
+/// Show the "recording started" notification, respecting the user's notification
+/// preferences. Shared by both recording start paths so the behaviour stays in sync.
+async fn notify_recording_started<R: Runtime>(app: &AppHandle<R>, meeting_name: &str) {
+    let notification_manager_state = app.state::<NotificationManagerState<R>>();
+    if let Err(e) = notifications::commands::show_recording_started_notification(
+        app,
+        &notification_manager_state,
+        Some(meeting_name.to_string()),
+    )
+    .await
+    {
+        log_error!("Failed to show recording started notification: {}", e);
+    } else {
+        log_info!("Successfully showed recording started notification");
+    }
+}
+
 #[tauri::command]
 async fn start_recording<R: Runtime>(
     app: AppHandle<R>,
@@ -173,21 +190,7 @@ async fn start_recording<R: Runtime>(
 
             // Show recording started notification through NotificationManager
             // This respects user's notification preferences
-            let notification_manager_state = app.state::<NotificationManagerState<R>>();
-            if let Err(e) = notifications::commands::show_recording_started_notification(
-                &app,
-                &notification_manager_state,
-                meeting_name.clone(),
-            )
-            .await
-            {
-                log_error!(
-                    "Failed to show recording started notification: {}",
-                    e
-                );
-            } else {
-                log_info!("Successfully showed recording started notification");
-            }
+            notify_recording_started(&app, meeting_name.as_deref().unwrap_or("")).await;
 
             Ok(())
         }
@@ -406,19 +409,7 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
             // Show recording started notification through NotificationManager
             // This respects user's notification preferences
-            let notification_manager_state = app.state::<NotificationManagerState<R>>();
-            if let Err(e) = notifications::commands::show_recording_started_notification(
-                &app,
-                &notification_manager_state,
-                meeting_name_for_notification.clone(),
-            )
-            .await
-            {
-                log_error!(
-                    "Failed to show recording started notification: {}",
-                    e
-                );
-            }
+            notify_recording_started(&app, meeting_name_for_notification.as_deref().unwrap_or("")).await;
 
             Ok(())
         }

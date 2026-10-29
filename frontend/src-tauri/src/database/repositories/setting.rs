@@ -191,16 +191,25 @@ impl SettingsRepository {
             }
         };
 
+        let default_model = match provider {
+            "localWhisper" | "whisper" => crate::config::DEFAULT_WHISPER_MODEL,
+            _ => crate::config::DEFAULT_PARAKEET_MODEL,
+        };
         let query = format!(
             r#"
             INSERT INTO transcript_settings (id, provider, model, "{}")
-            VALUES ('1', 'parakeet', '{}', $1)
+            VALUES ('1', $1, COALESCE((SELECT model FROM transcript_settings WHERE id = '1'), $2), $3)
             ON CONFLICT(id) DO UPDATE SET
-                "{}" = $1
+                "{}" = $3
             "#,
-            api_key_column, crate::config::DEFAULT_PARAKEET_MODEL, api_key_column
+            api_key_column, api_key_column
         );
-        sqlx::query(&query).bind(api_key).execute(pool).await?;
+        sqlx::query(&query)
+            .bind(provider)
+            .bind(default_model)
+            .bind(api_key)
+            .execute(pool)
+            .await?;
 
         Ok(())
     }
@@ -295,11 +304,10 @@ impl SettingsRepository {
                 let config_json: Option<String> = record.get("customOpenAIConfig");
 
                 if let Some(json) = config_json {
-                    // Parse JSON into CustomOpenAIConfig
+                    // Parse JSON into CustomOpenAIConfig.
+                    // Use Decode (not Protocol) so the serde_json source error is preserved.
                     let config: CustomOpenAIConfig = serde_json::from_str(&json)
-                        .map_err(|e| sqlx::Error::Protocol(
-                            format!("Invalid JSON in customOpenAIConfig: {}", e).into()
-                        ))?;
+                        .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
 
                     Ok(Some(config))
                 } else {
