@@ -314,7 +314,7 @@ mod tests {
         tokens[4] = "al@@".to_string();
         tokens[5] = "e".to_string();
         let mut logits = vec![0.0f32; 3 * 8404];
-        logits[0 * 8404 + 3] = 10.0;
+        logits[3] = 10.0;
         logits[1 * 8404 + 4] = 10.0;
         logits[2 * 8404 + 5] = 10.0;
         let result = decode(&logits, 4, &tokens).unwrap();
