@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { toast } from 'sonner';
+import { saveFunasrModelSelection } from '@/lib/funasr';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
@@ -99,25 +101,33 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         }
     };
 
-    const handleFunasrModelSelect = (modelName: string) => {
+    const handleFunasrModelSelect = async (modelName: string) => {
         setTranscriptModelConfig({
             ...transcriptModelConfig,
             provider: 'funasr',
             model: modelName
         });
-        invoke('api_save_transcript_config', { provider: 'funasr', model: modelName, apiKey: null as string | null });
+        try {
+            await saveFunasrModelSelection(modelName);
+        } catch (err) {
+            toast.error(err instanceof Error ? err.message : 'Failed to save the FunASR model selection');
+        }
         if (onModelSelect) {
             onModelSelect();
         }
     };
 
-    const handleSherpaOnnxModelSelect = (modelName: string) => {
+    const handleSherpaOnnxModelSelect = async (modelName: string) => {
         setTranscriptModelConfig({
             ...transcriptModelConfig,
             provider: 'sherpa-onnx',
             model: modelName
         });
-        invoke('api_save_transcript_config', { provider: 'sherpa-onnx', model: modelName, apiKey: null as string | null });
+        try {
+            await invoke('api_save_transcript_config', { provider: 'sherpa-onnx', model: modelName, apiKey: null as string | null });
+        } catch (err) {
+            toast.error(err instanceof Error ? err.message : 'Failed to save the sherpa-onnx model selection');
+        }
         if (onModelSelect) {
             onModelSelect();
         }

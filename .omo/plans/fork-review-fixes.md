@@ -1226,7 +1226,7 @@ These failures/broken tools exist **before** this work starts. They are environm
   Evidence: `.omo/evidence/task-32-fork-review-fixes.txt`
   Commit: Y | `ci(windows): harden the DLL verification script`
 
-- [ ] 34. `frontend/src/components/FunasrModelManager.tsx` — persist the FunASR model selection before notifying the parent, and stop leaving unhandled save rejections in `TranscriptSettings.tsx` (2 findings)
+- [x] 34. `frontend/src/components/FunasrModelManager.tsx` — persist the FunASR model selection before notifying the parent, and stop leaving unhandled save rejections in `TranscriptSettings.tsx` (2 findings)
   **PRIMARY file: `frontend/src/components/FunasrModelManager.tsx`. Satellite edit (enumerated, must appear in the evidence file): `frontend/src/components/TranscriptSettings.tsx` — the two model-select handlers.**
   What to do / Must NOT do:
   1. **`selectModel` must persist first, notify second, and only claim success when the save succeeded.** Current code (`frontend/src/components/FunasrModelManager.tsx:129-149`) calls `onModelSelect(modelName)` BEFORE awaiting the save, and calls `toast.success(...)` after a `try/catch` that only `console.error`s — so the user is told "Switched to X" even when persistence failed. Replace the body with:

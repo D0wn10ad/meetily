@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { motion } from 'framer-motion';
 import { toast } from 'sonner';
-import { FunasrAPI, FunasrDownloadProgress } from '@/lib/funasr';
+import { FunasrAPI, FunasrDownloadProgress, saveFunasrModelSelection } from '@/lib/funasr';
 
 interface FunasrModelEntry {
   name: string;
@@ -127,20 +127,17 @@ export function FunasrModelManager({
   }, []);
 
   const selectModel = useCallback(async (modelName: string) => {
-    if (onModelSelect) {
-      onModelSelect(modelName);
-    }
-
     if (autoSave) {
       try {
-        await invoke('api_save_transcript_config', {
-          provider: 'funasr',
-          model: modelName,
-          apiKey: null as string | null
-        });
+        await saveFunasrModelSelection(modelName);
       } catch (err) {
-        console.error('Failed to save FunASR model selection:', err);
+        toast.error(err instanceof Error ? err.message : 'Failed to save the FunASR model selection');
+        return;
       }
+    }
+
+    if (onModelSelect) {
+      onModelSelect(modelName);
     }
 
     toast.success(`Switched to ${modelName}`, {

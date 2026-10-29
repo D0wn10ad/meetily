@@ -1,0 +1,218 @@
+================================================================================
+TASK T34 — fork-review-fixes — persist FunASR model selection before notifying
+================================================================================
+Worktree: /home/tango/repo/meetily/.worktrees/fork-review-fixes
+Branch:   fix/fork-review-fixes
+Base HEAD at start: b4d952cad02c12867c9775f9e8c30aa3a7c1be5b
+Date (host): 2026-10-29
+
+Primary file : frontend/src/components/FunasrModelManager.tsx
+Satellite    : frontend/src/components/TranscriptSettings.tsx  (two model-select handlers only)
+
+--------------------------------------------------------------------------------
+TEST-COVERAGE REALITY (recorded verbatim, from the plan)
+--------------------------------------------------------------------------------
+The frontend test harness is `bun:test` with `mock.module` and does NOT include
+`@testing-library/react` or `jsdom` (`frontend/package.json:103` only has
+`@types/bun`), so these two components cannot be rendered in a test. The
+red→green pair for this todo therefore lives in `frontend/tests/lib/funasr.test.ts`
+(T30 item 6 asserts `saveFunasrModelSelection` calls `invoke` once with the exact
+arguments and rejects with the `Failed to save the FunASR model selection: `
+prefix). The component layer is verified by the static assertions below plus
+`pnpm exec tsc --noEmit` and a recorded manual-QA note (no display on this host —
+the click-through is deferred, see MANUAL QA below).
+
+--------------------------------------------------------------------------------
+RED (before) — verbatim
+--------------------------------------------------------------------------------
+--- grep -n "invoke('api_save_transcript_config'" FunasrModelManager.tsx ---
+136:        await invoke('api_save_transcript_config', {
+
+--- grep -c 'invoke(' FunasrModelManager.tsx ---
+1
+
+--- grep -n 'saveFunasrModelSelection' FunasrModelManager.tsx ---
+(no hits)
+
+--- selectModel body (L129-149), before ---
+  const selectModel = useCallback(async (modelName: string) => {
+    if (onModelSelect) {
+      onModelSelect(modelName);
+    }
+
+    if (autoSave) {
+      try {
+        await invoke('api_save_transcript_config', {
+          provider: 'funasr',
+          model: modelName,
+          apiKey: null as string | null
+        });
+      } catch (err) {
+        console.error('Failed to save FunASR model selection:', err);
+      }
+    }
+
+    toast.success(`Switched to ${modelName}`, {
+      duration: 3000
+    });
+  }, [onModelSelect, autoSave]);
+
+--- TranscriptSettings fire-and-forget handlers (L102-124), before ---
+    const handleFunasrModelSelect = (modelName: string) => {
+        setTranscriptModelConfig({
+            ...transcriptModelConfig,
+            provider: 'funasr',
+            model: modelName
+        });
+        invoke('api_save_transcript_config', { provider: 'funasr', model: modelName, apiKey: null as string | null });
+        if (onModelSelect) {
+            onModelSelect();
+        }
+    };
+
+    const handleSherpaOnnxModelSelect = (modelName: string) => {
+        setTranscriptModelConfig({
+            ...transcriptModelConfig,
+            provider: 'sherpa-onnx',
+            model: modelName
+        });
+        invoke('api_save_transcript_config', { provider: 'sherpa-onnx', model: modelName, apiKey: null as string | null });
+        if (onModelSelect) {
+            onModelSelect();
+        }
+    };
+
+--- grep -n "toast from 'sonner'" TranscriptSettings.tsx ---
+(no hits)
+
+FAILING STATE (static): the parent callback fires before persistence, and the
+success toast fires even if the save rejected; the two TranscriptSettings
+handlers fire the save without await/catch (unhandled rejection).
+
+--------------------------------------------------------------------------------
+GREEN (after) — verbatim
+--------------------------------------------------------------------------------
+--- grep -n "invoke('api_save_transcript_config'" FunasrModelManager.tsx ---
+(no hits)
+
+--- grep -c 'invoke(' FunasrModelManager.tsx ---
+0
+
+--- grep -n 'saveFunasrModelSelection' FunasrModelManager.tsx ---
+6:import { FunasrAPI, FunasrDownloadProgress, saveFunasrModelSelection } from '@/lib/funasr';
+132:        await saveFunasrModelSelection(modelName);
+
+--- grep -n 'listen<FunasrDownloadProgress>' FunasrModelManager.tsx ---
+73:      unlisten = await listen<FunasrDownloadProgress>(
+
+--- grep -n -A2 'api_save_transcript_config' TranscriptSettings.tsx ---
+127:            await invoke('api_save_transcript_config', { provider: 'sherpa-onnx', model: modelName, apiKey: null as string | null });
+128-        } catch (err) {
+129-            toast.error(err instanceof Error ? err.message : 'Failed to save the sherpa-onnx model selection');
+--
+158:                                        invoke('api_save_transcript_config', { provider: 'funasr', model: '', apiKey: null as string | null });
+159-                                    }
+160-                                    if (provider === 'sherpa-onnx') {
+--
+162:                                        invoke('api_save_transcript_config', { provider: 'sherpa-onnx', model: '', apiKey: null as string | null });
+163-                                    }
+164-                                }}
+
+NOTE on the two remaining hits at TranscriptSettings.tsx:158/162: they are the
+provider-switch `onValueChange` block (out of scope — the plan scopes ONLY the two
+model-select handlers `handleFunasrModelSelect`/`handleSherpaOnnxModelSelect`).
+The FunASR branch (line 104-118) uses the shared helper, so it no longer calls
+`invoke('api_save_transcript_config'...)` directly; the sherpa handler keeps the
+direct invoke but is now awaited inside try/catch (line 127).
+
+--- grep -n "toast from 'sonner'" TranscriptSettings.tsx ---
+(no match; see note)
+The plan's literal pattern `toast from 'sonner'` does NOT match named-import
+syntax because of the `}` between `toast` and `from`. Actual import line:
+3:import { toast } from 'sonner';
+Verified with: grep -n "from 'sonner'" src/components/TranscriptSettings.tsx
+  3:import { toast } from 'sonner';
+=> exactly one hit.
+
+--- invoke import retained in TranscriptSettings (still used) ---
+49:            const data = await invoke('api_get_transcript_api_key', { provider }) as string;
+127:            await invoke('api_save_transcript_config', { provider: 'sherpa-onnx', ... });
+158/162:        provider-switch onValueChange block (unchanged)
+
+--- invoke import retained in FunasrModelManager (NOT unused) ---
+The plan's item 2 said to remove the `invoke` import "IF this was its only use".
+It is NOT: `invoke<FunasrModelEntry[]>('api_scan_funasr_models')` is still used
+at L40 (initial scan), L97 (post-download rescan), L173 and L270. Those generic
+calls do not match the literal `invoke(` pattern, which is why `grep -c 'invoke('`
+reads 0 while the import is still required. `./node_modules/.bin/tsc --noEmit`
+exits 0 and eslint on FunasrModelManager exits 0, proving the import is used and
+no unused-import error exists. Import therefore intentionally kept.
+
+--------------------------------------------------------------------------------
+DIFF SCOPE (git diff --stat)
+--------------------------------------------------------------------------------
+ frontend/src/components/FunasrModelManager.tsx | 19 ++++++++-----------
+ frontend/src/components/TranscriptSettings.tsx | 18 ++++++++++++++----
+ 2 files changed, 22 insertions(+), 15 deletions(-)
+Only the two in-scope files changed. No JSX/layout/prop changes; `listen` handler
+and `FunasrDownloadProgress` import untouched; `setTranscriptModelConfig` still
+runs first in both handlers.
+
+--------------------------------------------------------------------------------
+TYPECHECK
+--------------------------------------------------------------------------------
+`rtk tsc --noEmit` (wrapper) — exit 1 with 20 pre-existing, unrelated errors
+(TS2882 CSS side-effect imports, TS2307 `bun:test` type declarations, TS7031/
+TS7006 implicit anys in pre-existing test files). None in the two changed files.
+The plan explicitly allows falling back to the project-local binary in this case.
+
+Project-local (what `pnpm exec tsc` resolves):
+  ./node_modules/.bin/tsc --noEmit
+  => TSC_EXIT=0
+(`./node_modules/.bin/tsc` and `./node_modules/.bin/eslint` are the same binaries
+ `pnpm exec` resolves — no npx involved.)
+
+--------------------------------------------------------------------------------
+ESLINT
+--------------------------------------------------------------------------------
+./node_modules/.bin/eslint src/components/FunasrModelManager.tsx
+  => exit 0
+
+./node_modules/.bin/eslint src/components/FunasrModelManager.tsx src/components/TranscriptSettings.tsx
+  => exit 1, 2 errors — BOTH pre-existing and in UNTOUCHED code:
+     TranscriptSettings.tsx:37:9 and :42:13 `react-hooks/set-state-in-effect`
+     (the two `useEffect` blocks that sync `uiProvider`/`apiKey`).
+  Proof pre-existing: running eslint on the HEAD version of the file via
+  `git show HEAD:frontend/src/components/TranscriptSettings.tsx | eslint --stdin
+   --stdin-filename src/components/TranscriptSettings.tsx` yields the identical
+  2 errors (exit 1). They are also recorded in the repo baseline
+  `.omo/evidence/t7-eslint-baseline.txt` (lines 838-863).
+  My edits introduce ZERO new eslint errors; the plan forbids changing unrelated
+  behaviour, so these two pre-existing violations were not "fixed" here.
+
+--------------------------------------------------------------------------------
+TESTS
+--------------------------------------------------------------------------------
+`rtk bun test` (full suite):
+    54 pass
+    2 fail
+    1 error
+  Ran 56 tests across 12 files.
+This is EXACTLY the recorded baseline (pre-existing: summary-language-preferences,
+summary-generation, meeting-details-refresh). No NEW failures.
+
+`rtk bun test tests/lib/funasr.test.ts`:
+    9 pass
+    0 fail
+  Ran 9 tests across 1 file.  (exit 0)  — helper red→green stays green.
+
+--------------------------------------------------------------------------------
+MANUAL QA (DEFERRED — no display on this host)
+--------------------------------------------------------------------------------
+Deferred click-through: select a FunASR model with the backend stopped → expect an
+error toast and NO "Switched to …" success toast; on success expect the parent to
+be notified after persistence. Not executed here (headless host).
+
+--------------------------------------------------------------------------------
+VERDICT: PASS
+================================================================================
