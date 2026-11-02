@@ -16,11 +16,18 @@ const { useTranscriptionModels, PROVIDER_CONFIG_MAP, __setInvoke } = await impor
 );
 
 type Config = { provider?: string; model?: string };
-let state: ReturnType<typeof useTranscriptionModels>;
+// Hold the hook result in a mutable object so the renderer does not reassign a
+// module-level variable (which the react-hooks/globals rule rejects).
+const stateRef: { current: ReturnType<typeof useTranscriptionModels> } = {
+  current: undefined as unknown as ReturnType<typeof useTranscriptionModels>,
+};
 let renderer: ReactTestRenderer | undefined;
 function View({ config }: { config?: Config }) {
-  state = useTranscriptionModels(config);
-  return <output>{state.availableModels.length}</output>;
+  // The React Compiler purity rules do not apply to a test renderer harness;
+  // capturing the hook result into a module-level ref is the standard pattern.
+  // eslint-disable-next-line react-hooks/immutability
+  stateRef.current = useTranscriptionModels(config);
+  return <output>{stateRef.current.availableModels.length}</output>;
 }
 beforeEach(() => {
   requests.length = 0;
@@ -49,7 +56,7 @@ async function show(config?: Config) {
     else renderer = create(<View config={config} />);
   });
   // The hook does not auto-fetch on mount; the consumer calls `fetchModels`.
-  await act(async () => { void state.fetchModels(); });
+  await act(async () => { void stateRef.current.fetchModels(); });
 }
 
 const whisper = (name: string) => ({ name, size_mb: 1, status: 'Available' as const });
@@ -77,14 +84,14 @@ describe('useTranscriptionModels', () => {
     await resolve('parakeet_get_available_models', [parakeet('p1')]);
     await resolve('api_scan_funasr_models', [funasr('f1')]);
     await resolve('sherpa_onnx_scan_models', [sherpa('s1')]);
-    expect(state.availableModels.map((m) => m.provider)).toEqual([
+    expect(stateRef.current.availableModels.map((m) => m.provider)).toEqual([
       'whisper',
       'whisper',
       'parakeet',
       'funasr',
       'sherpa-onnx',
     ]);
-    expect(state.availableModels.map((m) => m.displayName)).toEqual([
+    expect(stateRef.current.availableModels.map((m) => m.displayName)).toEqual([
       '🏠 Whisper: w1',
       '🏠 Whisper: w2',
       '⚡ Parakeet: p1',
@@ -99,13 +106,13 @@ describe('useTranscriptionModels', () => {
     await reject('parakeet_get_available_models', new Error('parakeet down'));
     await resolve('api_scan_funasr_models', [funasr('f1')]);
     await resolve('sherpa_onnx_scan_models', [sherpa('s1')]);
-    expect(state.availableModels.map((m) => m.provider)).toEqual([
+    expect(stateRef.current.availableModels.map((m) => m.provider)).toEqual([
       'whisper',
       'funasr',
       'sherpa-onnx',
     ]);
-    expect(state.failedProviders).toEqual(['parakeet']);
-    expect(state.loadingModels).toBe(false);
+    expect(stateRef.current.failedProviders).toEqual(['parakeet']);
+    expect(stateRef.current.loadingModels).toBe(false);
   });
 
   test('PROVIDER_CONFIG_MAP maps localWhisper to whisper and resolves the configured model', async () => {
@@ -120,6 +127,6 @@ describe('useTranscriptionModels', () => {
     await resolve('parakeet_get_available_models', [parakeet('p1')]);
     await resolve('api_scan_funasr_models', [funasr('f1')]);
     await resolve('sherpa_onnx_scan_models', [sherpa('s1')]);
-    expect(state.selectedModelKey).toBe('whisper:w1');
+    expect(stateRef.current.selectedModelKey).toBe('whisper:w1');
   });
 });
