@@ -134,10 +134,14 @@ export function LanguageSelection({
   const isParakeet = provider === 'parakeet';
   const isFunasr = provider === 'funasr';
   const isSherpaOnnx = provider === 'sherpa-onnx';
-  const isAutoDetectOnly = isParakeet || isFunasr || isSherpaOnnx;
+  const isAutoDetectOnly = isParakeet || isFunasr;
+
+  const senseVoiceLanguages = ['auto', 'auto-translate', 'zh', 'en', 'ja', 'ko', 'yue'];
   const availableLanguages = isAutoDetectOnly
     ? LANGUAGES.filter(lang => lang.code === 'auto' || lang.code === 'auto-translate')
-    : LANGUAGES;
+    : isSherpaOnnx
+      ? LANGUAGES.filter(lang => senseVoiceLanguages.includes(lang.code))
+      : LANGUAGES;
 
   const handleLanguageChange = async (languageCode: string) => {
     setSaving(true);
