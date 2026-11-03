@@ -5,6 +5,8 @@
 
 use std::path::Path;
 
+use crate::audio::hardware_detector::GpuType;
+
 use sherpa_onnx::{
     OfflineRecognizer, OfflineRecognizerConfig, OfflineSenseVoiceModelConfig,
 };
@@ -23,12 +25,25 @@ impl std::fmt::Debug for SherpaOnnxEngine {
     }
 }
 
+/// Map detected GPU type to sherpa-onnx provider string.
+///
+/// sherpa-onnx's OfflineRecognizer only supports cpu/cuda/coreml.
+/// DirectML (for Windows AMD/Intel) is NOT supported — see
+/// https://github.com/k2-fsa/sherpa-onnx/issues/3194
+fn provider_for_gpu(gpu_type: GpuType) -> &'static str {
+    match gpu_type {
+        GpuType::Cuda => "cuda",
+        GpuType::Metal => "coreml",
+        _ => "cpu",
+    }
+}
+
 impl SherpaOnnxEngine {
     /// Create a new engine from a validated model directory.
     ///
     /// Validates the directory has `tokens.txt` and at least one `.onnx` file,
     /// then creates an [`OfflineRecognizer`] configured for SenseVoice.
-    pub fn new(model_dir: &Path) -> Result<Self, SherpaOnnxError> {
+    pub fn new(model_dir: &Path, language: Option<&str>) -> Result<Self, SherpaOnnxError> {
         // Validate model directory structure
         model::validate_model_dir(model_dir)?;
 
@@ -37,16 +52,24 @@ impl SherpaOnnxEngine {
 
         // Build recognizer config
         let mut config = OfflineRecognizerConfig::default();
+        // SenseVoice supports: auto, zh, en, ja, ko, yue
+        let sensevoice_lang = match language {
+            Some(lang @ ("zh" | "en" | "ja" | "ko" | "yue")) => lang,
+            _ => "auto",
+        };
         config.model_config.sense_voice = OfflineSenseVoiceModelConfig {
             model: Some(model_path.to_string_lossy().into_owned()),
-            language: Some("auto".into()),
+            language: Some(sensevoice_lang.to_string()),
             use_itn: true,
         };
         config.model_config.tokens = Some(
             model_dir.join("tokens.txt").to_string_lossy().into_owned(),
         );
         config.model_config.num_threads = 4;
-        config.model_config.provider = Some("cpu".into());
+        let gpu_type = crate::audio::hardware_detector::HardwareProfile::detect().gpu_type;
+        let provider = provider_for_gpu(gpu_type);
+        log::info!("Sherpa-ONNX using provider: {} (detected GPU: {:?})", provider, gpu_type);
+        config.model_config.provider = Some(provider.into());
 
         // Create recognizer
         let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
@@ -92,7 +115,7 @@ mod tests {
 
     #[test]
     fn test_new_with_nonexistent_dir() {
-        let result = SherpaOnnxEngine::new(Path::new("/tmp/nonexistent_sherpa_12345"));
+        let result = SherpaOnnxEngine::new(Path::new("/tmp/nonexistent_sherpa_12345"), None);
         assert!(result.is_err(), "Nonexistent dir should fail");
         match result {
             Err(SherpaOnnxError::ModelNotFound(_)) => {} // expected
@@ -104,7 +127,7 @@ mod tests {
     fn test_new_with_invalid_dir_missing_tokens() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("model.int8.onnx"), "dummy").ok();
-        let result = SherpaOnnxEngine::new(dir.path());
+        let result = SherpaOnnxEngine::new(dir.path(), None);
         match result {
             Err(SherpaOnnxError::ModelNotFound(ref msg)) => {
                 assert!(
@@ -121,7 +144,7 @@ mod tests {
     fn test_new_with_invalid_dir_missing_onnx() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("tokens.txt"), "a b c").ok();
-        let result = SherpaOnnxEngine::new(dir.path());
+        let result = SherpaOnnxEngine::new(dir.path(), None);
         match result {
             Err(SherpaOnnxError::ModelNotFound(ref msg)) => {
                 assert!(
@@ -147,7 +170,7 @@ mod tests {
             "this is not a real onnx model",
         )
         .ok();
-        let result = SherpaOnnxEngine::new(dir.path());
+        let result = SherpaOnnxEngine::new(dir.path(), None);
         assert!(
             result.is_err(),
             "Fake ONNX file should fail to create recognizer"

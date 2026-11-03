@@ -309,7 +309,7 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                 .join("models")
                 .join("sherpa-onnx")
                 .join(model_name);
-            let provider = crate::audio::transcription::SherpaOnnxProvider::new(&model_dir)
+            let provider = crate::audio::transcription::SherpaOnnxProvider::new(&model_dir, None)
                 .map_err(|e| format!("Failed to initialize Sherpa-ONNX: {}", e))?;
             Ok(TranscriptionEngine::Provider(Arc::new(provider)))
         }

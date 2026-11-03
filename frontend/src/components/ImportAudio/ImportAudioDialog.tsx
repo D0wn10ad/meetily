@@ -173,7 +173,7 @@ export function ImportAudioDialog({
   const isSherpaOnnxModel = selectedModel?.provider === 'sherpa-onnx';
 
   useEffect(() => {
-    if ((isParakeetModel || isSherpaOnnxModel) && selectedLang !== 'auto') {
+    if (isParakeetModel && selectedLang !== 'auto') {
       setSelectedLang('auto');
     }
   }, [isParakeetModel, isSherpaOnnxModel, selectedLang]);
@@ -191,7 +191,7 @@ export function ImportAudioDialog({
     await startImport(
       fileInfo.path,
       title || fileInfo.filename,
-      isParakeetModel || isSherpaOnnxModel ? null : selectedLang === 'auto' ? null : selectedLang,
+      isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang,
       selectedModel?.name || null,
       selectedModel?.provider || null
     );
@@ -344,7 +344,7 @@ export function ImportAudioDialog({
                   {showAdvanced && (
                     <div className="p-3 pt-0 space-y-4 border-t">
                       {/* Language selector */}
-                      {!isParakeetModel && !isSherpaOnnxModel ? (
+                      {!isParakeetModel ? (
                         <div className="space-y-2">
                           <div className="flex items-center gap-2">
                             <Globe className="h-4 w-4 text-muted-foreground" />
