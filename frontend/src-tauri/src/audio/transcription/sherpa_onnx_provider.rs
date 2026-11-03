@@ -10,8 +10,8 @@ pub struct SherpaOnnxProvider {
 }
 
 impl SherpaOnnxProvider {
-    pub fn new(model_dir: &Path) -> Result<Self, crate::sherpa_onnx::SherpaOnnxError> {
-        let engine = SherpaOnnxEngine::new(model_dir)?;
+    pub fn new(model_dir: &Path, language: Option<String>) -> Result<Self, crate::sherpa_onnx::SherpaOnnxError> {
+        let engine = SherpaOnnxEngine::new(model_dir, language.as_deref())?;
         Ok(SherpaOnnxProvider { engine })
     }
 }

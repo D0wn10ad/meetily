@@ -374,7 +374,7 @@ async fn run_retranscription<R: Runtime>(
     };
     let sherpa_onnx_engine = if use_sherpa_onnx {
         info!("Initializing Sherpa-ONNX engine...");
-        Some(get_or_init_sherpa_onnx(&app, model.as_deref()).await?)
+        Some(get_or_init_sherpa_onnx(&app, model.as_deref(), language.as_deref()).await?)
     } else {
         None
     };
@@ -462,7 +462,7 @@ async fn run_retranscription<R: Runtime>(
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
             (text, 0.0f32)
         } else if use_sherpa_onnx {
-            let sherpa_onnx = get_or_init_sherpa_onnx(&app, model.as_deref()).await
+            let sherpa_onnx = get_or_init_sherpa_onnx(&app, model.as_deref(), language.as_deref()).await
                 .map_err(|e| anyhow!("Sherpa-ONNX engine init failed: {}", e))?;
             let result = sherpa_onnx.transcribe(segment.samples.clone(), None).await
                 .map_err(|e| anyhow!("Sherpa-ONNX transcription failed on segment {}: {}", i, e))?;
@@ -900,6 +900,7 @@ async fn get_or_init_funasr<R: Runtime>(
 async fn get_or_init_sherpa_onnx<R: Runtime>(
     app: &AppHandle<R>,
     model: Option<&str>,
+    language: Option<&str>,
 ) -> Result<Arc<SherpaOnnxProvider>> {
     if let Some(engine) = SHERPA_ONNX_ENGINE.get() {
         return Ok(engine.clone());
@@ -915,7 +916,7 @@ async fn get_or_init_sherpa_onnx<R: Runtime>(
         model_dir.display()
     );
 
-    let provider = SherpaOnnxProvider::new(&model_dir)
+    let provider = SherpaOnnxProvider::new(&model_dir, language.map(|s| s.to_string()))
         .map_err(|e| anyhow!("Failed to initialize Sherpa-ONNX engine: {}", e))?;
     let provider = Arc::new(provider);
 
