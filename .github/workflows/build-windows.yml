@@ -708,19 +708,24 @@ jobs:
       - name: Refresh sherpa-onnx prebuilt libs
         shell: pwsh
         run: |
-          # rust-cache restores compiled sherpa-onnx-sys artifacts whose baked-in
-          # link search path points into target/sherpa-onnx-prebuilt. The build
-          # script only re-runs when its own inputs change, so deleting the
+          # rust-cache restores compiled build-script artifacts whose baked-in
+          # link search path points into target/sherpa-onnx-prebuilt. Build
+          # scripts only re-run when their own inputs change, so deleting the
           # extracted libs alone leaves a stale link path and causes LNK1181.
           # Remove extracted dirs (keep downloaded archives) AND cached
-          # build-script outputs so cargo re-runs the build script, which
-          # re-extracts from the cached archive or re-downloads if needed.
+          # build-script outputs so cargo re-runs both sherpa-onnx-sys's build
+          # script and the app's build/onnxruntime.rs, which re-extracts from
+          # the cached archive and removes onnxruntime_providers_shared.dll
+          # from the profile dir so Tauri bundles exactly one onnxruntime DLL.
           Get-ChildItem -Path target/sherpa-onnx-prebuilt -Directory -ErrorAction SilentlyContinue |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
           Get-ChildItem -Path target -Recurse -Directory -Filter "sherpa-onnx-sys-*" -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match '[\\/]build[\\/]' } |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-          Write-Host "Refreshed sherpa-onnx prebuilt libs; sherpa-onnx-sys build script will re-run"
+          Get-ChildItem -Path target -Recurse -Directory -Filter "meetily-*" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '[\\/]build[\\/]' } |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "Refreshed sherpa-onnx prebuilt libs; sherpa-onnx-sys and app build scripts will re-run"
 
       # sherpa-onnx prebuilt libs are fetched by sherpa-onnx-sys's own build
       # script, pinned to v1.13.8 via Cargo.toml/Cargo.lock: it downloads
@@ -728,8 +733,10 @@ jobs:
       # target/sherpa-onnx-prebuilt and copies the runtime DLLs (including the
       # ORT 1.28.2 onnxruntime.dll staged by build/onnxruntime.rs) to the cargo
       # profile dir. The refresh step above removes extracted dirs (keeping the
-      # downloaded archive) and cached build-script outputs so cargo re-runs the
-      # build script on cache hits, avoiding a stale link path and LNK1181.
+      # downloaded archive) and cached build-script outputs for both
+      # sherpa-onnx-sys and the app, so cargo re-runs them on cache hits,
+      # avoiding a stale link path (LNK1181) and ensuring the app build script
+      # removes onnxruntime_providers_shared.dll so only one DLL is bundled.
       # Do NOT export SHERPA_ONNX_LIB_DIR here: an override pinned
       # to an older release would link and stage the wrong onnxruntime.dll.
 
