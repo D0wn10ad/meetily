@@ -717,8 +717,14 @@ jobs:
           # the fingerprints, guaranteeing both build scripts re-run on cache hits.
           Get-ChildItem -Path target/sherpa-onnx-prebuilt -Directory -ErrorAction SilentlyContinue |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          # actions/cache restores binaries/onnxruntime with a valid onnxruntime.dll,
+          # so build/onnxruntime.rs's rerun-if-changed=binaries/onnxruntime sees no
+          # change and cargo replays the cached warning without running the script.
+          # Delete the staged dir to force a real re-run (same path as a cache miss),
+          # which removes onnxruntime_providers_shared.dll from the profile dir.
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue frontend/src-tauri/binaries/onnxruntime
           cargo clean -p meetily -p sherpa-onnx-sys
-          Write-Host "Cleaned meetily and sherpa-onnx-sys cargo artifacts; both build scripts will re-run"
+          Write-Host "Removed staged onnxruntime dir and cleaned meetily/sherpa-onnx-sys cargo artifacts; both build scripts will re-run"
 
       # sherpa-onnx prebuilt libs are fetched by sherpa-onnx-sys's own build
       # script, pinned to v1.13.8 via Cargo.toml/Cargo.lock: it downloads
@@ -726,10 +732,11 @@ jobs:
       # target/sherpa-onnx-prebuilt and copies the runtime DLLs (including the
       # ORT 1.28.2 onnxruntime.dll staged by build/onnxruntime.rs) to the cargo
       # profile dir. The refresh step above removes extracted dirs (keeping the
-      # downloaded archive) and runs cargo clean -p for both sherpa-onnx-sys and
-      # the app, so cargo re-runs both build scripts on cache hits, avoiding a
-      # stale link path (LNK1181) and ensuring the app build script removes
-      # onnxruntime_providers_shared.dll so only one DLL is bundled.
+      # downloaded archive), deletes the cache-restored staged onnxruntime dir so
+      # the app build script re-runs, and runs cargo clean -p for both
+      # sherpa-onnx-sys and the app, so cargo re-runs both build scripts on cache
+      # hits, avoiding a stale link path (LNK1181) and ensuring the app build
+      # script removes onnxruntime_providers_shared.dll so only one DLL is bundled.
       # Do NOT export SHERPA_ONNX_LIB_DIR here: an override pinned
       # to an older release would link and stage the wrong onnxruntime.dll.
 
