@@ -138,6 +138,94 @@ fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .join("paraformer-large"))
 }
 
+/// Serializable entry returned by the FunASR readiness `get_available_models`
+/// command. Mirrors the shape of `api_scan_funasr_models` in `lib.rs` and adds
+/// a UI-compatible `status` field (`Available`) so `hasDownloadingModel` sees
+/// a known value.
+#[derive(Debug, Serialize)]
+pub struct FunasrModelStatusEntry {
+    pub name: String,
+    pub path: String,
+    pub valid: bool,
+    pub size_mb: f64,
+    pub status: String,
+}
+
+/// Scan `app_data_dir/models/funasr` for model directories and report their
+/// validity. Mirrors `api_scan_funasr_models` in `lib.rs` so the readiness
+/// check and the model-list UI agree on what counts as an installed model.
+fn scan_funasr_models(funasr_dir: &Path) -> Result<Vec<FunasrModelStatusEntry>, String> {
+    if !funasr_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut models = Vec::new();
+    for entry in fs::read_dir(funasr_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let has_token = path.join("tokens.json").exists() || path.join("token.json").exists();
+            let valid = path.join("model.onnx").exists()
+                && has_token
+                && path.join("am.mvn").exists();
+            models.push(FunasrModelStatusEntry {
+                name,
+                path: path.display().to_string(),
+                valid,
+                size_mb: crate::directory_size_mb(&path),
+                status: "Available".to_string(),
+            });
+        }
+    }
+    Ok(models)
+}
+
+/// Lightweight readiness init for FunASR.
+///
+/// The FunASR engine is constructed lazily at transcription start
+/// (`get_or_init_transcription_engine`); there is no persistent global engine
+/// to warm up here. This command only ensures the models directory exists so
+/// the readiness scan has a stable root, and is idempotent.
+#[tauri::command]
+pub async fn funasr_init(app: AppHandle) -> Result<(), String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?
+        .join("models")
+        .join("funasr");
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create FunASR models dir: {}", e))?;
+    log::debug!("FunASR readiness init ensured models dir: {:?}", dir);
+    Ok(())
+}
+
+/// Return whether at least one valid FunASR model is installed.
+#[tauri::command]
+pub async fn funasr_has_available_models(app: AppHandle) -> Result<bool, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?
+        .join("models")
+        .join("funasr");
+    let models = scan_funasr_models(&dir)?;
+    Ok(models.iter().any(|m| m.valid))
+}
+
+/// Return the discovered FunASR model entries (readiness API shape).
+#[tauri::command]
+pub async fn funasr_get_available_models(
+    app: AppHandle,
+) -> Result<Vec<FunasrModelStatusEntry>, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?
+        .join("models")
+        .join("funasr");
+    scan_funasr_models(&dir)
+}
+
 async fn download_file(
     url: &str,
     dest: &Path,

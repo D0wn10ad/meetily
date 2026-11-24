@@ -1042,9 +1042,17 @@ pub fn run() {
             audio::import::is_import_in_progress_command,
             // FunASR model scanning command
             api_scan_funasr_models,
+            // FunASR readiness commands
+            funasr_onnx::commands::funasr_init,
+            funasr_onnx::commands::funasr_has_available_models,
+            funasr_onnx::commands::funasr_get_available_models,
             // Sherpa-ONNX model management commands
             sherpa_onnx::commands::sherpa_onnx_scan_models,
             sherpa_onnx::commands::sherpa_onnx_validate_model,
+            // Sherpa-ONNX readiness commands
+            sherpa_onnx::commands::sherpa_onnx_init,
+            sherpa_onnx::commands::sherpa_onnx_has_available_models,
+            sherpa_onnx::commands::sherpa_onnx_get_available_models,
             // FunASR download commands
             funasr_onnx::commands::funasr_download_model,
             funasr_onnx::commands::funasr_cancel_download,

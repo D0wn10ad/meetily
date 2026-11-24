@@ -186,6 +186,66 @@ pub(crate) fn ensure_models_dir(root: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(root)
 }
 
+/// Serializable entry returned by the sherpa-onnx readiness
+/// `get_available_models` command. Mirrors [`SherpaOnnxModelEntry`] and adds a
+/// UI-compatible `status` field (`Available`) so `hasDownloadingModel` sees a
+/// known value.
+#[derive(Debug, Serialize)]
+pub struct SherpaOnnxModelStatusEntry {
+    pub name: String,
+    pub path: String,
+    pub valid: bool,
+    pub size_mb: f64,
+    pub status: String,
+}
+
+/// Lightweight readiness init for sherpa-onnx.
+///
+/// The sherpa-onnx engine is constructed lazily at transcription start; there
+/// is no persistent global engine to warm up here. This command only ensures
+/// the models directory exists so the readiness scan has a stable root, and is
+/// idempotent.
+#[tauri::command]
+pub async fn sherpa_onnx_init<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?
+        .join("models")
+        .join("sherpa-onnx");
+    ensure_models_dir(&dir)
+        .map_err(|e| format!("Failed to create sherpa-onnx models dir: {}", e))?;
+    log::debug!("Sherpa-ONNX readiness init ensured models dir: {:?}", dir);
+    Ok(())
+}
+
+/// Return whether at least one valid sherpa-onnx model is installed.
+#[tauri::command]
+pub async fn sherpa_onnx_has_available_models<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<bool, String> {
+    let entries = sherpa_onnx_scan_models(app).await?;
+    Ok(entries.iter().any(|m| m.valid))
+}
+
+/// Return the discovered sherpa-onnx model entries (readiness API shape).
+#[tauri::command]
+pub async fn sherpa_onnx_get_available_models<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Vec<SherpaOnnxModelStatusEntry>, String> {
+    let entries = sherpa_onnx_scan_models(app).await?;
+    Ok(entries
+        .into_iter()
+        .map(|m| SherpaOnnxModelStatusEntry {
+            name: m.name,
+            path: m.path,
+            valid: m.valid,
+            size_mb: m.size_mb,
+            status: "Available".to_string(),
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
