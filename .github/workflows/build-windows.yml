@@ -705,18 +705,32 @@ jobs:
           key: ${{ runner.os }}-onnxruntime-x86_64-pc-windows-msvc-sherpa1.13.8-ort1.28.2-${{ hashFiles('frontend/src-tauri/build/onnxruntime.rs', 'Cargo.lock') }}
 
 
-      - name: Clear sherpa prebuilt cache
+      - name: Refresh sherpa-onnx prebuilt libs
         shell: pwsh
         run: |
-          Write-Host "Removing stale sherpa-onnx prebuilt cache to force re-download (fixes LNK1181 in debug builds and missing sherpa-onnx-c-api.dll in release builds)"
-          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue target/sherpa-onnx-prebuilt
+          # rust-cache restores compiled sherpa-onnx-sys artifacts whose baked-in
+          # link search path points into target/sherpa-onnx-prebuilt. The build
+          # script only re-runs when its own inputs change, so deleting the
+          # extracted libs alone leaves a stale link path and causes LNK1181.
+          # Remove extracted dirs (keep downloaded archives) AND cached
+          # build-script outputs so cargo re-runs the build script, which
+          # re-extracts from the cached archive or re-downloads if needed.
+          Get-ChildItem -Path target/sherpa-onnx-prebuilt -Directory -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem -Path target -Recurse -Directory -Filter "sherpa-onnx-sys-*" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '[\\/]build[\\/]' } |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "Refreshed sherpa-onnx prebuilt libs; sherpa-onnx-sys build script will re-run"
 
       # sherpa-onnx prebuilt libs are fetched by sherpa-onnx-sys's own build
       # script, pinned to v1.13.8 via Cargo.toml/Cargo.lock: it downloads
       # sherpa-onnx-v1.13.8-win-x64-shared-MT-Release-lib.tar.bz2 into
       # target/sherpa-onnx-prebuilt and copies the runtime DLLs (including the
       # ORT 1.28.2 onnxruntime.dll staged by build/onnxruntime.rs) to the cargo
-      # profile dir. Do NOT export SHERPA_ONNX_LIB_DIR here: an override pinned
+      # profile dir. The refresh step above removes extracted dirs (keeping the
+      # downloaded archive) and cached build-script outputs so cargo re-runs the
+      # build script on cache hits, avoiding a stale link path and LNK1181.
+      # Do NOT export SHERPA_ONNX_LIB_DIR here: an override pinned
       # to an older release would link and stage the wrong onnxruntime.dll.
 
       - name: Verify migration files have LF line endings
