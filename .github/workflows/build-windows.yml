@@ -705,38 +705,35 @@ jobs:
           key: ${{ runner.os }}-onnxruntime-x86_64-pc-windows-msvc-sherpa1.13.8-ort1.28.2-${{ hashFiles('frontend/src-tauri/build/onnxruntime.rs', 'Cargo.lock') }}
 
 
-      - name: Refresh sherpa-onnx prebuilt libs
+      - name: Force ONNX Runtime re-staging on cache hits
         shell: pwsh
         run: |
-          # rust-cache restores compiled artifacts AND fingerprints for both
-          # sherpa-onnx-sys and the app. Deleting only build-script output dirs
-          # leaves fingerprints intact, so cargo considers the scripts fresh and
-          # replays cached output (stale link path -> LNK1181; app build script
-          # never runs -> onnxruntime_providers_shared.dll stays in the profile
-          # dir and gets bundled). cargo clean -p removes BOTH the outputs and
-          # the fingerprints, guaranteeing both build scripts re-run on cache hits.
-          Get-ChildItem -Path target/sherpa-onnx-prebuilt -Directory -ErrorAction SilentlyContinue |
-            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          # Keep target/sherpa-onnx-prebuilt (extracted dirs AND archive) and the
+          # profile-dir DLLs intact: cached build artifacts contain a baked-in link
+          # path into those dirs, and the app build script needs the staged
+          # profile-dir onnxruntime.dll as its source. Deleting either would cause
+          # LNK1181 or a race where the app build script runs before sherpa-onnx-sys
+          # re-stages the DLL.
           # actions/cache restores binaries/onnxruntime with a valid onnxruntime.dll,
           # so build/onnxruntime.rs's rerun-if-changed=binaries/onnxruntime sees no
           # change and cargo replays the cached warning without running the script.
-          # Delete the staged dir to force a real re-run (same path as a cache miss),
-          # which removes onnxruntime_providers_shared.dll from the profile dir.
+          # Delete only that staged dir to force the app build script to re-run on
+          # cache hits; it removes onnxruntime_providers_shared.dll from the profile
+          # dir and re-stages exactly one onnxruntime.dll. On a cache miss nothing
+          # is removed, preserving the known-good deps-first ordering.
           Remove-Item -Recurse -Force -ErrorAction SilentlyContinue frontend/src-tauri/binaries/onnxruntime
-          cargo clean -p meetily -p sherpa-onnx-sys
-          Write-Host "Removed staged onnxruntime dir and cleaned meetily/sherpa-onnx-sys cargo artifacts; both build scripts will re-run"
+          Write-Host "Removed staged onnxruntime dir; app build script will re-run and remove onnxruntime_providers_shared.dll"
 
       # sherpa-onnx prebuilt libs are fetched by sherpa-onnx-sys's own build
       # script, pinned to v1.13.8 via Cargo.toml/Cargo.lock: it downloads
       # sherpa-onnx-v1.13.8-win-x64-shared-MT-Release-lib.tar.bz2 into
       # target/sherpa-onnx-prebuilt and copies the runtime DLLs (including the
       # ORT 1.28.2 onnxruntime.dll staged by build/onnxruntime.rs) to the cargo
-      # profile dir. The refresh step above removes extracted dirs (keeping the
-      # downloaded archive), deletes the cache-restored staged onnxruntime dir so
-      # the app build script re-runs, and runs cargo clean -p for both
-      # sherpa-onnx-sys and the app, so cargo re-runs both build scripts on cache
-      # hits, avoiding a stale link path (LNK1181) and ensuring the app build
-      # script removes onnxruntime_providers_shared.dll so only one DLL is bundled.
+      # profile dir. The step above intentionally keeps those extracted dirs and
+      # profile DLLs intact (valid link path, staged source DLL) and removes only
+      # the cache-restored staged binaries/onnxruntime dir so
+      # rerun-if-changed=binaries/onnxruntime forces the app build script to re-run
+      # and remove onnxruntime_providers_shared.dll, leaving exactly one DLL bundled.
       # Do NOT export SHERPA_ONNX_LIB_DIR here: an override pinned
       # to an older release would link and stage the wrong onnxruntime.dll.
 
