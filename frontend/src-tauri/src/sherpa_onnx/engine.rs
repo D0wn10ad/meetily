@@ -31,11 +31,23 @@ impl SherpaOnnxEngine {
     /// Validates the directory has `tokens.txt` and at least one `.onnx` file,
     /// then creates an [`OfflineRecognizer`] configured for SenseVoice.
     pub fn new(model_dir: &Path) -> Result<Self, SherpaOnnxError> {
+        log::debug!(
+            "Sherpa-ONNX engine new: model_dir={} exists={} tokens.txt={}",
+            model_dir.display(),
+            model_dir.exists(),
+            model_dir.join("tokens.txt").exists()
+        );
         // Validate model directory structure
         model::validate_model_dir(model_dir)?;
+        log::debug!("Sherpa-ONNX engine new: validate_model_dir OK");
 
         // Locate the .onnx model file
         let model_path = model::find_onnx_model_file(model_dir)?;
+        log::debug!(
+            "Sherpa-ONNX engine new: onnx model={} size={:?} bytes",
+            model_path.display(),
+            std::fs::metadata(&model_path).ok().map(|m| m.len())
+        );
 
         // Build recognizer config
         let mut config = OfflineRecognizerConfig::default();
@@ -50,11 +62,16 @@ impl SherpaOnnxEngine {
         config.model_config.provider = Some("cpu".into());
 
         // Create recognizer
+        log::debug!(
+            "Sherpa-ONNX engine new: creating recognizer (provider=cpu, num_threads=4, language=auto, itn=true)"
+        );
         let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
+            log::debug!("Sherpa-ONNX engine new: OfflineRecognizer::create returned None");
             SherpaOnnxError::SherpaOnnx {
                 message: recognizer_create_failure_message(&model_path, &tokens_path),
             }
         })?;
+        log::debug!("Sherpa-ONNX engine new: recognizer created OK");
 
         Ok(Self {
             recognizer,
@@ -76,6 +93,11 @@ impl SherpaOnnxEngine {
         samples: &[f32],
         sample_rate: u32,
     ) -> Result<String, SherpaOnnxError> {
+        log::debug!(
+            "Sherpa-ONNX transcribe_audio: {} samples @ {} Hz",
+            samples.len(),
+            sample_rate
+        );
         let sample_rate = validate_transcribe_inputs(samples, sample_rate)?;
 
         // A fresh stream per call is required by the sherpa-onnx API: offline
@@ -84,13 +106,20 @@ impl SherpaOnnxEngine {
         // between calls.
         let stream = self.recognizer.create_stream();
         stream.accept_waveform(sample_rate, samples);
+        log::debug!("Sherpa-ONNX transcribe_audio: waveform accepted, decoding");
         self.recognizer.decode(&stream);
+        log::debug!("Sherpa-ONNX transcribe_audio: decode returned");
 
         let result = stream.get_result().ok_or_else(|| {
+            log::debug!("Sherpa-ONNX transcribe_audio: get_result returned None");
             SherpaOnnxError::SherpaOnnx {
                 message: "No recognition result returned".into(),
             }
         })?;
+        log::debug!(
+            "Sherpa-ONNX transcribe_audio: result text {} chars",
+            result.text.chars().count()
+        );
 
         Ok(result.text)
     }

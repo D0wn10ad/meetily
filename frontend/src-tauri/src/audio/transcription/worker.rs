@@ -237,7 +237,16 @@ pub fn start_transcription_task<R: Runtime>(
                     let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
                     let processing_started = Instant::now();
 
-                    if !engine_clone.is_model_loaded().await {
+                    let model_loaded = engine_clone.is_model_loaded().await;
+                    debug!(
+                        "Worker chunk: provider={} model_loaded={} samples={} sample_rate={} duration_s={:.3}",
+                        engine_clone.provider_name(),
+                        model_loaded,
+                        chunk.data.len(),
+                        chunk.sample_rate,
+                        chunk_duration
+                    );
+                    if !model_loaded {
                         stats.record_failure(WorkerFailureCategory::ModelNotLoaded);
                     } else {
                         match transcribe_chunk_with_provider(&engine_clone, chunk, &app_clone).await {
@@ -466,6 +475,12 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
         }
         TranscriptionEngine::Provider(provider) => {
             let language = crate::get_language_preference_internal();
+            debug!(
+                "Worker dispatch: provider={} samples={} language={:?}",
+                provider.provider_name(),
+                speech_samples.len(),
+                language
+            );
             match provider.transcribe(speech_samples, language).await {
                 Ok(result) => Ok((
                     result.text.trim().to_string(),

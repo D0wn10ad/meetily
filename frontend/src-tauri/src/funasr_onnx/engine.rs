@@ -75,9 +75,19 @@ pub struct FunasrEngine {
 
 impl FunasrEngine {
     pub fn new(model_dir: &Path) -> Result<Self, FunasrError> {
+        log::debug!(
+            "FunASR engine new: model_dir={} exists={} am.mvn={} model.onnx={} tokens.json={}",
+            model_dir.display(),
+            model_dir.exists(),
+            model_dir.join("am.mvn").exists(),
+            model_dir.join("model.onnx").exists(),
+            model_dir.join("tokens.json").exists()
+        );
         let cmvn_path = model_dir.join("am.mvn");
         let frontend = FunasrFrontend::new(&cmvn_path)?;
+        log::debug!("FunASR engine new: frontend (CMVN) loaded OK");
         let model = FunasrModel::new(model_dir)?;
+        log::debug!("FunASR engine new: ONNX model loaded OK");
         log::info!(
             "FunASR engine initialized with model from {}",
             model_dir.display()
@@ -88,9 +98,26 @@ impl FunasrEngine {
     pub fn transcribe_audio(&self, audio: &[f32]) -> Result<String, FunasrError> {
         log::info!("FunASR transcribing {} audio samples...", audio.len());
         let (features, feats_len) = self.frontend.process(audio)?;
+        log::debug!(
+            "FunASR stage frontend: {} samples -> {} feature values, feats_len={}",
+            audio.len(),
+            features.len(),
+            feats_len
+        );
         let (logits, token_num) = self.model.transcribe(&features, feats_len)?;
+        log::debug!(
+            "FunASR stage model: feats_len={} -> {} logit values, token_num={}",
+            feats_len,
+            logits.len(),
+            token_num
+        );
         let text =
             crate::funasr_onnx::decoder::decode(&logits, token_num, self.model.token_list())?;
+        log::debug!(
+            "FunASR stage decoder: token_num={} -> {} chars",
+            token_num,
+            text.chars().count()
+        );
         log::info!("FunASR transcription: '{}'", text);
         Ok(text)
     }

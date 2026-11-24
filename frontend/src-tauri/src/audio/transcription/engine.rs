@@ -310,6 +310,11 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
         }
         "funasr" => {
             info!("🎯 Initializing FunASR transcription engine");
+            log::debug!(
+                "FunASR init: provider=funasr config.model={:?} (empty={})",
+                config.model,
+                config.model.is_empty()
+            );
             let app_data_dir = app
                 .path()
                 .app_data_dir()
@@ -319,12 +324,27 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                 .join("models")
                 .join("funasr")
                 .join(model_name);
+            log::debug!(
+                "FunASR init: resolved model_name={} model_dir={} exists={}",
+                model_name,
+                model_dir.display(),
+                model_dir.exists()
+            );
             let provider = crate::audio::transcription::FunasrProvider::new(&model_dir)
-                .map_err(|e| format!("Failed to initialize FunASR: {}", e))?;
+                .map_err(|e| {
+                    log::debug!("FunASR init: provider construction FAILED: {e}");
+                    format!("Failed to initialize FunASR: {}", e)
+                })?;
+            log::debug!("FunASR init: provider constructed OK");
             Ok(TranscriptionEngine::Provider(Arc::new(provider)))
         }
         "sherpa-onnx" => {
             info!("🎯 Initializing Sherpa-ONNX transcription engine");
+            log::debug!(
+                "Sherpa-ONNX init: provider=sherpa-onnx config.model={:?} (empty={})",
+                config.model,
+                config.model.is_empty()
+            );
             let app_data_dir = app
                 .path()
                 .app_data_dir()
@@ -338,8 +358,18 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                 .join("models")
                 .join("sherpa-onnx")
                 .join(model_name);
+            log::debug!(
+                "Sherpa-ONNX init: resolved model_name={} model_dir={} exists={}",
+                model_name,
+                model_dir.display(),
+                model_dir.exists()
+            );
             let provider = crate::audio::transcription::SherpaOnnxProvider::new(&model_dir)
-                .map_err(|e| format!("Failed to initialize Sherpa-ONNX: {}", e))?;
+                .map_err(|e| {
+                    log::debug!("Sherpa-ONNX init: provider construction FAILED: {e}");
+                    format!("Failed to initialize Sherpa-ONNX: {}", e)
+                })?;
+            log::debug!("Sherpa-ONNX init: provider constructed OK");
             Ok(TranscriptionEngine::Provider(Arc::new(provider)))
         }
         "localWhisper" | _ => {

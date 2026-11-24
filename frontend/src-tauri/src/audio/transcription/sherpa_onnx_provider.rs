@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use log::{error, info};
+use log::{debug, error, info};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -22,7 +22,26 @@ fn map_engine_error(e: &SherpaOnnxError) -> TranscriptionError {
 
 impl SherpaOnnxProvider {
     pub fn new(model_dir: &Path) -> Result<Self, crate::sherpa_onnx::SherpaOnnxError> {
+        let onnx_files = std::fs::read_dir(model_dir)
+            .ok()
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.path().is_file()
+                            && e.path().extension().map_or(false, |ext| ext == "onnx")
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        debug!(
+            "Sherpa-ONNX provider new: model_dir={} exists={} tokens.txt={} onnx_files={}",
+            model_dir.display(),
+            model_dir.exists(),
+            model_dir.join("tokens.txt").exists(),
+            onnx_files
+        );
         let engine = Arc::new(SherpaOnnxEngine::new(model_dir)?);
+        debug!("Sherpa-ONNX provider new: engine constructed OK");
         Ok(SherpaOnnxProvider { engine })
     }
 }
@@ -55,7 +74,9 @@ impl TranscriptionProvider for SherpaOnnxProvider {
                 minimum: 1,
             });
         }
-        info!("Sherpa-ONNX provider transcribing {} samples", audio.len());
+        let sample_count = audio.len();
+        info!("Sherpa-ONNX provider transcribing {} samples", sample_count);
+        let started = std::time::Instant::now();
         let engine = Arc::clone(&self.engine);
         let text = tokio::task::spawn_blocking(move || engine.transcribe_audio(&audio, 16000))
             .await
@@ -69,6 +90,12 @@ impl TranscriptionProvider for SherpaOnnxProvider {
         info!(
             "Sherpa-ONNX provider transcription completed ({} chars)",
             text.chars().count()
+        );
+        debug!(
+            "Sherpa-ONNX provider timing: {} samples -> {} chars in {} ms",
+            sample_count,
+            text.chars().count(),
+            started.elapsed().as_millis()
         );
         Ok(TranscriptResult {
             text: text.trim().to_string(),

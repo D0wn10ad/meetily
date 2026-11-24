@@ -36,8 +36,17 @@ fn map_engine_error(e: &FunasrError) -> TranscriptionError {
 
 impl FunasrProvider {
     pub fn new(model_dir: &Path) -> Result<Self, crate::funasr_onnx::FunasrError> {
+        debug!(
+            "FunASR provider new: model_dir={} exists={} am.mvn={} model.onnx={} tokens.json={}",
+            model_dir.display(),
+            model_dir.exists(),
+            model_dir.join("am.mvn").exists(),
+            model_dir.join("model.onnx").exists(),
+            model_dir.join("tokens.json").exists()
+        );
         let engine = Arc::new(FunasrEngine::new(model_dir)?);
         let model_name = derived_model_name(model_dir);
+        debug!("FunASR provider new: engine constructed, model_name={}", model_name);
         Ok(FunasrProvider { engine, model_name })
     }
 }
@@ -67,7 +76,9 @@ impl TranscriptionProvider for FunasrProvider {
         if let Some(ref lang) = _language {
             warn!("FunASR (Paraformer) defaults to Chinese, ignoring language preference '{}'", lang);
         }
-        info!("FunASR provider transcribing {} samples", audio.len());
+        let sample_count = audio.len();
+        info!("FunASR provider transcribing {} samples", sample_count);
+        let started = std::time::Instant::now();
         let engine = Arc::clone(&self.engine);
         let text = tokio::task::spawn_blocking(move || engine.transcribe_audio(&audio))
             .await
@@ -76,6 +87,12 @@ impl TranscriptionProvider for FunasrProvider {
             })?
             .map_err(|e| map_engine_error(&e))?;
         debug!("FunASR provider transcription completed: '{}'", text);
+        debug!(
+            "FunASR provider timing: {} samples -> {} chars in {} ms",
+            sample_count,
+            text.chars().count(),
+            started.elapsed().as_millis()
+        );
         Ok(TranscriptResult {
             text: text.trim().to_string(),
             confidence: None,
