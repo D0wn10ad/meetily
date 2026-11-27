@@ -710,17 +710,21 @@ jobs:
         run: |
           # Keep target/sherpa-onnx-prebuilt (extracted dirs AND archive) and the
           # profile-dir DLLs intact: cached build artifacts contain a baked-in link
-          # path into those dirs, and the app build script needs the staged
+          # path into those dirs, and the app build script prefers the staged
           # profile-dir onnxruntime.dll as its source. Deleting either would cause
           # LNK1181 or a race where the app build script runs before sherpa-onnx-sys
           # re-stages the DLL.
           # actions/cache restores binaries/onnxruntime with a valid onnxruntime.dll,
           # so build/onnxruntime.rs's rerun-if-changed=binaries/onnxruntime sees no
           # change and cargo replays the cached warning without running the script.
-          # Delete only that staged dir to force the app build script to re-run on
-          # cache hits; it removes onnxruntime_providers_shared.dll from the profile
-          # dir and re-stages exactly one onnxruntime.dll. On a cache miss nothing
-          # is removed, preserving the known-good deps-first ordering.
+          # build/onnxruntime.rs now also re-runs on every Actions run via
+          # cargo:rerun-if-env-changed=GITHUB_RUN_ID, and its resolver falls back to a
+          # verified sherpa-onnx prebuilt-cache onnxruntime.dll when the profile-dir
+          # copy is missing. Deleting the staged dir below is therefore defense-in-depth:
+          # it forces the app build script to re-run on cache hits, which removes
+          # onnxruntime_providers_shared.dll from the profile dir and re-stages exactly
+          # one onnxruntime.dll. On a cache miss nothing is removed, preserving the
+          # known-good deps-first ordering.
           Remove-Item -Recurse -Force -ErrorAction SilentlyContinue frontend/src-tauri/binaries/onnxruntime
           Write-Host "Removed staged onnxruntime dir; app build script will re-run and remove onnxruntime_providers_shared.dll"
 

@@ -15,7 +15,7 @@ use std::{
     env,
     fs::{self, File},
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
     process,
 };
 
@@ -38,6 +38,11 @@ pub fn ensure_onnxruntime_runtime() {
         return;
     }
     println!("cargo:rerun-if-changed=binaries/onnxruntime");
+    // Re-run on every GitHub Actions run even on a full cache hit: the staged
+    // binaries/onnxruntime dir is restored by actions/cache, so the directive
+    // above alone would skip this script and leave onnxruntime_providers_shared.dll
+    // in the profile dir. GITHUB_RUN_ID is set per Actions run and inert locally.
+    println!("cargo:rerun-if-env-changed=GITHUB_RUN_ID");
 
     let target = env::var("TARGET").expect("TARGET environment variable not set");
     if target != WINDOWS_X64_TARGET {
@@ -126,9 +131,12 @@ pub fn ensure_onnxruntime_runtime() {
         },
     }
 
-    // Source DLL lives in the cargo profile dir (resolved above), which
-    // sherpa-onnx-sys's copy_windows_runtime_dlls populated before this script.
-    let source = profile_dir.join(DLL_NAME);
+    // Source DLL: prefer the cargo profile-dir copy (populated by
+    // sherpa-onnx-sys's copy_windows_runtime_dlls before this script), else fall
+    // back to a verified sherpa-onnx prebuilt-cache copy. The profile-dir copy
+    // can be missing when a rust-cache restore replays build artifacts without
+    // re-running sherpa-onnx-sys's DLL copy.
+    let source = resolve_runtime_source(&profile_dir);
 
     fs::create_dir_all(
         destination
@@ -162,6 +170,80 @@ pub fn ensure_onnxruntime_runtime() {
     println!(
         "cargo:warning=Bundled verified ONNX Runtime at {}",
         destination.display()
+    );
+}
+
+/// Resolves the `onnxruntime.dll` source to stage.
+///
+/// Prefers the cargo profile-dir copy (populated by sherpa-onnx-sys's
+/// `copy_windows_runtime_dlls` before this script runs). When that copy is
+/// missing or fails verification — e.g. a rust-cache restore replays build
+/// artifacts without re-running sherpa-onnx-sys's DLL copy — falls back to a
+/// verified copy inside the sherpa-onnx prebuilt cache
+/// (`target/sherpa-onnx-prebuilt/<archive>/lib/onnxruntime.dll`), honoring the
+/// `SHERPA_ONNX_PREBUILT` override. Fails closed with a searched-paths
+/// diagnostic when no verified source exists.
+fn resolve_runtime_source(profile_dir: &Path) -> PathBuf {
+    let profile_copy = profile_dir.join(DLL_NAME);
+    if verify_file(&profile_copy, DLL_NAME, DLL_SIZE, DLL_SHA256).is_ok() {
+        return profile_copy;
+    }
+
+    let prebuilt_root = match env::var("SHERPA_ONNX_PREBUILT") {
+        Ok(override_dir) if !override_dir.is_empty() => {
+            let root = Path::new(&override_dir).to_path_buf();
+            if !root.is_dir() {
+                panic!(
+                    "SHERPA_ONNX_PREBUILT={} is not a directory; cannot resolve a verified ONNX Runtime source",
+                    root.display()
+                );
+            }
+            root
+        }
+        _ => match build_env::find_prebuilt_dir(profile_dir) {
+            Some(root) => root,
+            None => {
+                panic!(
+                    "No ONNX Runtime source found: profile-dir copy {} is missing or invalid, and no \
+                     sherpa-onnx prebuilt cache was found. Searched ancestors: {}",
+                    profile_copy.display(),
+                    build_env::describe_prebuilt_search(profile_dir)
+                );
+            }
+        },
+    };
+
+    let mut searched = Vec::new();
+    searched.push(profile_copy.display().to_string());
+
+    let mut archives: Vec<String> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&prebuilt_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if entry.path().is_dir() {
+                archives.push(name);
+            }
+        }
+    }
+    let archives = build_env::prefer_shared_archives(&archives);
+    let candidates = build_env::prebuilt_dll_candidates(&prebuilt_root, &archives, DLL_NAME);
+
+    for candidate in &candidates {
+        searched.push(candidate.display().to_string());
+        if verify_file(candidate, DLL_NAME, DLL_SIZE, DLL_SHA256).is_ok() {
+            println!(
+                "cargo:warning=Staged ONNX Runtime from prebuilt cache: {}",
+                candidate.display()
+            );
+            return candidate.clone();
+        }
+    }
+
+    panic!(
+        "Failed to stage bundled ONNX Runtime: no verified onnxruntime.dll source found. \
+         Searched: {}. If SHERPA_ONNX_PREBUILT is set, point it at a sherpa-onnx prebuilt \
+         cache root containing a valid onnxruntime.dll.",
+        searched.join(", ")
     );
 }
 

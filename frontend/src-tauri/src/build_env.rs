@@ -128,6 +128,58 @@ pub fn staged_file_state(src: &Metadata, dst: &Metadata) -> StagedFileState {
     }
 }
 
+// --- T4: ONNX runtime DLL source resolution helpers ---------------------
+//
+// These are pure, filesystem-free, deterministic path-ordering helpers used by
+// `build/onnxruntime.rs` to pick a verified `onnxruntime.dll` source. Keeping
+// them free of `read_dir`/`is_file` lets them be unit-tested without a Windows
+// prebuilt cache present, and keeps this file stdlib-only.
+
+/// Orders prebuilt archive directory names so archives whose name contains
+/// "shared" are considered before others, then the rest lexicographically.
+///
+/// The sherpa-onnx prebuilt cache holds one directory per downloaded archive
+/// (e.g. `sherpa-onnx-v1.13.8-win-x64-shared-MT-Release-lib`). The `shared`
+/// archives carry the runtime `onnxruntime.dll` we need; preferring them keeps
+/// the resolver deterministic and aligned with `build/sherpa.rs`.
+#[allow(dead_code)]
+pub fn prefer_shared_archives(names: &[String]) -> Vec<String> {
+    let mut shared: Vec<String> = Vec::new();
+    let mut others: Vec<String> = Vec::new();
+    for name in names {
+        if name.contains("shared") {
+            shared.push(name.clone());
+        } else {
+            others.push(name.clone());
+        }
+    }
+    shared.sort();
+    others.sort();
+    shared.extend(others);
+    shared
+}
+
+/// Builds the ordered list of candidate paths for `dll_name` inside
+/// `prebuilt_root`: the direct `<root>/<dll_name>` first, then
+/// `<root>/<archive>/lib/<dll_name>` for each archive in `archives` (in the
+/// order given — callers should pass the output of [`prefer_shared_archives`]).
+///
+/// Pure and deterministic: it only joins paths, never touches the filesystem,
+/// so the caller decides which candidates actually exist and pass verification.
+#[allow(dead_code)]
+pub fn prebuilt_dll_candidates(
+    prebuilt_root: &Path,
+    archives: &[String],
+    dll_name: &str,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::with_capacity(archives.len() + 1);
+    candidates.push(prebuilt_root.join(dll_name));
+    for archive in archives {
+        candidates.push(prebuilt_root.join(archive).join("lib").join(dll_name));
+    }
+    candidates
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +384,69 @@ mod tests {
             "panic message must name PROFILE, got: {message}"
         );
         println!("captured panic message: {message}");
+    }
+
+    // --- T4: ONNX runtime DLL source resolution helpers -----------------
+
+    #[test]
+    fn prefer_shared_archives_orders_shared_before_others() {
+        let names = vec![
+            "sherpa-onnx-v1.13.8-win-x64-cpu-lib".to_string(),
+            "sherpa-onnx-v1.13.8-win-x64-shared-MT-Release-lib".to_string(),
+            "sherpa-onnx-v1.13.8-win-x64-shared-Release-lib".to_string(),
+        ];
+        let ordered = prefer_shared_archives(&names);
+        assert_eq!(
+            ordered,
+            vec![
+                "sherpa-onnx-v1.13.8-win-x64-shared-MT-Release-lib".to_string(),
+                "sherpa-onnx-v1.13.8-win-x64-shared-Release-lib".to_string(),
+                "sherpa-onnx-v1.13.8-win-x64-cpu-lib".to_string(),
+            ],
+            "shared archives must sort before non-shared, each group lexicographic"
+        );
+    }
+
+    #[test]
+    fn prebuilt_dll_candidates_puts_direct_then_shared_lib_first() {
+        let root = Path::new("/cache/sherpa-onnx-prebuilt");
+        let archives = vec![
+            "sherpa-onnx-v1.13.8-win-x64-shared-MT-Release-lib".to_string(),
+            "sherpa-onnx-v1.13.8-win-x64-cpu-lib".to_string(),
+        ];
+        let candidates = prebuilt_dll_candidates(root, &archives, "onnxruntime.dll");
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/cache/sherpa-onnx-prebuilt/onnxruntime.dll"),
+                PathBuf::from(
+                    "/cache/sherpa-onnx-prebuilt/sherpa-onnx-v1.13.8-win-x64-shared-MT-Release-lib/lib/onnxruntime.dll"
+                ),
+                PathBuf::from(
+                    "/cache/sherpa-onnx-prebuilt/sherpa-onnx-v1.13.8-win-x64-cpu-lib/lib/onnxruntime.dll"
+                ),
+            ],
+            "direct DLL first, then <root>/<archive>/lib/<dll> in archive order"
+        );
+    }
+
+    #[test]
+    fn prebuilt_dll_candidates_is_pure_and_deterministic() {
+        let root = Path::new("/cache/sherpa-onnx-prebuilt");
+        let archives = vec![
+            "sherpa-onnx-v1.13.8-win-x64-shared-MT-Release-lib".to_string(),
+            "sherpa-onnx-v1.13.8-win-x64-cpu-lib".to_string(),
+        ];
+        let first = prebuilt_dll_candidates(root, &archives, "onnxruntime.dll");
+        let second = prebuilt_dll_candidates(root, &archives, "onnxruntime.dll");
+        assert_eq!(
+            first, second,
+            "same input must yield identical candidate paths (pure, deterministic)"
+        );
+        assert_eq!(
+            first.len(),
+            archives.len() + 1,
+            "one direct candidate plus one per archive"
+        );
     }
 }
