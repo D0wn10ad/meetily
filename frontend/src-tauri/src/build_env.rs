@@ -180,6 +180,20 @@ pub fn prebuilt_dll_candidates(
     candidates
 }
 
+/// Builds the ordered list of `<root>/<archive>.tar.bz2` candidate paths for
+/// each archive name in `archives` (in the order given).
+///
+/// Pure and deterministic: it only joins paths, never touches the filesystem,
+/// so the caller decides which candidates actually exist and pass verification.
+#[allow(dead_code)]
+pub fn archive_tarball_candidates(prebuilt_root: &Path, archives: &[String]) -> Vec<PathBuf> {
+    let mut candidates = Vec::with_capacity(archives.len());
+    for archive in archives {
+        candidates.push(prebuilt_root.join(format!("{}.tar.bz2", archive)));
+    }
+    candidates
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +461,30 @@ mod tests {
             first.len(),
             archives.len() + 1,
             "one direct candidate plus one per archive"
+        );
+    }
+
+    #[test]
+    fn archive_tarball_candidates_appends_extension_in_order() {
+        let root = Path::new("/cache/sherpa-onnx-prebuilt");
+        let archives = vec!["a".to_string(), "b".to_string()];
+        let candidates = archive_tarball_candidates(root, &archives);
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/cache/sherpa-onnx-prebuilt/a.tar.bz2"),
+                PathBuf::from("/cache/sherpa-onnx-prebuilt/b.tar.bz2"),
+            ],
+            "one <archive>.tar.bz2 per archive, in the given order"
+        );
+        let second = archive_tarball_candidates(root, &archives);
+        assert_eq!(
+            candidates, second,
+            "same input must yield identical paths (pure, deterministic)"
+        );
+        assert!(
+            archive_tarball_candidates(root, &[]).is_empty(),
+            "empty archive list must yield no candidates"
         );
     }
 }

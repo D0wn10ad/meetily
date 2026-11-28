@@ -65,6 +65,7 @@ which = "6.0.1"
 zip = "2.2"           # ZIP extraction (Windows, macOS)
 tar = "0.4"           # TAR extraction (Linux)
 xz2 = "0.1"           # XZ decompression (Linux)
+bzip2 = "0.4"         # BZ2 decompression (Windows archive fallback)
 sha2 = "0.10"
 
 

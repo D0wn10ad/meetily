@@ -10,14 +10,16 @@
 //! deliberately NOT staged: the 1.28.2 DLL does not import it, and CI
 //! (.github/verify-windows-dlls.ps1) enforces exactly one `onnxruntime*.dll`.
 
+use bzip2::read::BzDecoder;
 use sha2::{Digest, Sha256};
 use std::{
     env,
     fs::{self, File},
-    io::Read,
-    path::{Path, PathBuf},
+    io::{self, Read},
+    path::{Component, Path, PathBuf},
     process,
 };
+use tar::Archive;
 
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
@@ -173,6 +175,73 @@ pub fn ensure_onnxruntime_runtime() {
     );
 }
 
+/// True only when `entry_path` is exactly `<archive>/lib/onnxruntime.dll`.
+/// Rejects absolute paths, parent traversal, and every other member so a
+/// malformed archive can never stage `onnxruntime_providers_shared.dll`.
+fn archive_member_matches(entry_path: &Path, archive_name: &str) -> bool {
+    let mut actual = Vec::new();
+    for component in entry_path.components() {
+        match component {
+            Component::Normal(part) => actual.push(part.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            _ => return false,
+        }
+    }
+    let expected: Vec<String> = Path::new(archive_name)
+        .join("lib")
+        .join(DLL_NAME)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    actual == expected
+}
+
+/// Streams the single verified DLL member out of a retained `.tar.bz2` archive
+/// into `output`. Never extracts any other member.
+fn extract_dll_from_archive(
+    archive_path: &Path,
+    archive_name: &str,
+    output: &Path,
+) -> Result<(), String> {
+    let file = File::open(archive_path)
+        .map_err(|error| format!("failed to open archive {}: {error}", archive_path.display()))?;
+    let decoder = BzDecoder::new(file);
+    let mut archive = Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|error| format!("failed to read archive entries: {error}"))?;
+
+    for entry in entries {
+        let mut entry = entry.map_err(|error| format!("failed to read archive entry: {error}"))?;
+        let entry_path = entry
+            .path()
+            .map_err(|error| format!("failed to read archive entry path: {error}"))?
+            .into_owned();
+        if !archive_member_matches(&entry_path, archive_name) {
+            continue;
+        }
+
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+        }
+        let mut extracted = File::create(output)
+            .map_err(|error| format!("failed to create {}: {error}", output.display()))?;
+        io::copy(&mut entry, &mut extracted)
+            .map_err(|error| format!("failed to extract {}: {error}", entry_path.display()))?;
+        return Ok(());
+    }
+
+    Err(format!(
+        "archive {} does not contain {}",
+        archive_path.display(),
+        Path::new(archive_name).join("lib").join(DLL_NAME).display()
+    ))
+}
+
 /// Resolves the `onnxruntime.dll` source to stage.
 ///
 /// Prefers the cargo profile-dir copy (populated by sherpa-onnx-sys's
@@ -181,8 +250,10 @@ pub fn ensure_onnxruntime_runtime() {
 /// artifacts without re-running sherpa-onnx-sys's DLL copy — falls back to a
 /// verified copy inside the sherpa-onnx prebuilt cache
 /// (`target/sherpa-onnx-prebuilt/<archive>/lib/onnxruntime.dll`), honoring the
-/// `SHERPA_ONNX_PREBUILT` override. Fails closed with a searched-paths
-/// diagnostic when no verified source exists.
+/// `SHERPA_ONNX_PREBUILT` override. If the extracted copy is also absent,
+/// recovers the DLL from the retained `<archive>.tar.bz2` (honoring
+/// `SHERPA_ONNX_ARCHIVE_DIR`), verifying it before use. Fails closed with a
+/// searched-paths diagnostic when no verified source exists.
 fn resolve_runtime_source(profile_dir: &Path) -> PathBuf {
     let profile_copy = profile_dir.join(DLL_NAME);
     if verify_file(&profile_copy, DLL_NAME, DLL_SIZE, DLL_SHA256).is_ok() {
@@ -236,6 +307,49 @@ fn resolve_runtime_source(profile_dir: &Path) -> PathBuf {
                 candidate.display()
             );
             return candidate.clone();
+        }
+    }
+
+    let archive_root = match env::var("SHERPA_ONNX_ARCHIVE_DIR") {
+        Ok(override_dir) if !override_dir.is_empty() => {
+            let root = Path::new(&override_dir).to_path_buf();
+            if !root.is_dir() {
+                panic!(
+                    "SHERPA_ONNX_ARCHIVE_DIR={} is not a directory; cannot recover ONNX Runtime from archive",
+                    root.display()
+                );
+            }
+            root
+        }
+        _ => prebuilt_root.clone(),
+    };
+    let archive_candidates = build_env::archive_tarball_candidates(&archive_root, &archives);
+    let extracted = profile_dir.join(format!(".onnxruntime-archive-{}.dll", process::id()));
+    for (archive_path, archive_name) in archive_candidates.iter().zip(archives.iter()) {
+        searched.push(archive_path.display().to_string());
+        if !archive_path.is_file() {
+            continue;
+        }
+        match extract_dll_from_archive(archive_path, archive_name, &extracted) {
+            Ok(()) => {
+                if verify_file(&extracted, DLL_NAME, DLL_SIZE, DLL_SHA256).is_ok() {
+                    println!(
+                        "cargo:warning=Staged ONNX Runtime from archive: {}",
+                        extracted.display()
+                    );
+                    return extracted;
+                }
+                searched.push(format!(
+                    "{} (extracted DLL failed verification)",
+                    extracted.display()
+                ));
+            }
+            Err(error) => {
+                println!(
+                    "cargo:warning=Skipping unusable ONNX Runtime archive {}: {error}",
+                    archive_path.display()
+                );
+            }
         }
     }
 
